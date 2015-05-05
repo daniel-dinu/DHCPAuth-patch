@@ -1,0 +1,20 @@
+The ISC DHCP is licensed under ISC license.
+
+The linked libraries have the following licenses:
+	* OpenSSL - OpenSSL license 
+	* GnuPG (GPGME, Libgpg-error) - GPL/LGPL
+
+Because OpenSSL license is incompatible with GPL/LGPL, the DHCPAuth module code 
+is split into two parts (patches):
+	* PKI (uses OpenSSL) licensed under ISC  
+	* PGP (uses GnuPG) licensed under GPL
+
+To build the full DHCPAuth module apply one of the patches and then add the 
+missing parts of the other patch.
+
+For more informarion about licenses see:
+	http://www.gnu.org/licenses/license-list.html.en
+	https://people.gnome.org/~markmc/openssl-and-the-gpl.html
+	https://www.openssl.org/support/faq.html#LEGAL2
+	https://en.wikipedia.org/wiki/GPL_linking_exception
+	http://en.wikipedia.org/wiki/ISC_license

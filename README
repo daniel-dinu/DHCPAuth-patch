@@ -1,0 +1,33 @@
+================================================================================
+           DHCPAuth patch - DHCP Message Authentication Module patch
+                           		 version 1.0.0
+================================================================================
+
+
+Copyright
+=========
+This is distributed under different licenses. See each patch folder for details.
+
+
+Project structure
+=================
+.
+├── AUTHORS
+├── CHANGELOG
+├── dhcp-4.2.7
+│   ├── pgp
+│   │   ├── dhcpauth_pgp.patch
+│   │   ├── LICENSE
+│   │   └── README
+│   ├── pki
+│   │   ├── dhcpauth_pki.patch
+│   │   ├── LICENSE
+│   │   └── README
+│   └── pki+pgp
+│       ├── patch
+│       │   └── README
+│       └── README
+├── README
+└── VERSION
+
+5 directories, 12 files

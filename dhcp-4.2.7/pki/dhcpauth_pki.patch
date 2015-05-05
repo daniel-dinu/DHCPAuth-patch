@@ -1,0 +1,3646 @@
+diff -Naur dhcp-4.2.7/client/dhclient.c dhcp-4.2.7+dhcpauth/client/dhclient.c
+--- dhcp-4.2.7/client/dhclient.c	2014-08-07 00:59:22.000000000 +0200
++++ dhcp-4.2.7+dhcpauth/client/dhclient.c	2015-05-02 01:00:00.000000000 +0200
+@@ -124,6 +124,10 @@
+ #endif /* DHCPv6 */
+ 	char *s;
+ 
++        /* dhcpauth - begin */
++        init_client_dhcpauth();
++        /* dhcpauth - end */
++        
+ 	/* Initialize client globals. */
+ 	memset(&default_duid, 0, sizeof(default_duid));
+ 
+@@ -1045,6 +1049,23 @@
+ 	struct option_cache *oc;
+ 	struct data_string ds;
+ 
++        /* dhcpauth - begin */
++#ifdef ENABLE_STATISTICS
++        start_auth_verify_timer();
++#endif
++        
++        if (verify_packet(packet)) {
++                /* Signature isn't valid => we ignore the packet */
++                log_info("Invalid DHCP ACK from %s", 
++                                piaddr (packet -> client_addr));
++                return;
++        }
++        
++#ifdef ENABLE_STATISTICS
++        stop_auth_verify_timer();
++#endif
++        /* dhcpauth - end */
++        
+ 	/* If we're not receptive to an offer right now, or if the offer
+ 	   has an unrecognizable transaction id, then just drop it. */
+ 	for (client = ip -> client; client; client = client -> next) {
+@@ -1282,6 +1303,12 @@
+ void state_bound (cpp)
+ 	void *cpp;
+ {
++        /* dhcpauth - begin */
++#ifdef ENABLE_STATISTICS
++        start_total_timer();
++#endif
++        /* dhcpauth - end */
++    
+ 	struct client_state *client = cpp;
+ 	struct option_cache *oc;
+ 	struct data_string ds;
+@@ -1316,6 +1343,12 @@
+ 
+ 	/* Send the first packet immediately. */
+ 	send_request (client);
++        
++        /* dhcpauth - begin */
++#ifdef ENABLE_STATISTICS
++        stop_total_timer();
++#endif
++        /* dhcpauth - end */
+ }
+ 
+ /* state_stop is called when we've been told to shut down.   We unconfigure
+@@ -1445,7 +1478,24 @@
+ 			return;
+ 		}
+ 	}
++        
++        /* dhcpauth - begin */
++#ifdef ENABLE_STATISTICS
++        if (DHCPACK == packet -> packet_type) {
++                start_total_timer();
++        }
++#endif
++        /* dhcpauth - end */
++        
+ 	(*handler) (packet);
++        
++        /* dhcpauth - begin */
++#ifdef ENABLE_STATISTICS
++        if (DHCPACK == packet -> packet_type) {
++                stop_total_timer();
++        }
++#endif
++        /* dhcpauth - end */
+ }
+ 
+ #ifdef DHCPv6
+@@ -1521,6 +1571,15 @@
+ 	dump_packet (packet);
+ #endif
+ 
++        /* dhcpauth - begin */
++        if (verify_packet(packet)) {
++                /* Signature isn't valid => we ignore the packet */
++                log_info("Invalid DHCP OFFER from %s", 
++                                piaddr (packet -> client_addr));
++                return;
++        } 
++        /* dhcpauth - end */
++        
+ 	/* Find a client state that matches the xid... */
+ 	for (client = ip -> client; client; client = client -> next)
+ 		if (client -> xid == packet -> raw -> xid)
+@@ -1768,6 +1827,15 @@
+ void dhcpnak (packet)
+ 	struct packet *packet;
+ {
++        /* dhcpauth - begin */
++        if (verify_packet(packet)) {
++                /* Signature isn't valid => we ignore the packet */
++                log_info("Invalid DHCP NAK from %s", 
++                                piaddr (packet -> client_addr));
++                return;
++        }
++        /* dhcpauth - end */
++    
+ 	struct interface_info *ip = packet -> interface;
+ 	struct client_state *client;
+ 
+@@ -1931,6 +1999,10 @@
+ 	      inet_ntoa (sockaddr_broadcast.sin_addr),
+ 	      ntohs (sockaddr_broadcast.sin_port), (long)(client -> interval));
+ 
++        /* dhcpauth - begin */
++        sign_packet(DHCPDISCOVER, &client -> packet, client -> packet_length);
++        /* dhcpauth - end */
++        
+ 	/* Send out a packet. */
+ 	result = send_packet(client->interface, NULL, &client->packet,
+ 			     client->packet_length, inaddr_any,
+@@ -2203,6 +2275,18 @@
+ 	      inet_ntoa (destination.sin_addr),
+ 	      ntohs (destination.sin_port));
+ 
++        /* dhcpauth - begin */ 
++#ifdef ENABLE_STATISTICS
++        start_auth_sign_timer();
++#endif
++        
++        sign_packet(DHCPREQUEST, &client -> packet, client -> packet_length);
++
++#ifdef ENABLE_STATISTICS
++        stop_auth_sign_timer();
++#endif
++        /* dhcpauth - end */
++        
+ 	if (destination.sin_addr.s_addr != INADDR_BROADCAST &&
+ 	    fallback_interface) {
+ 		result = send_packet(fallback_interface, NULL, &client->packet,
+@@ -2245,6 +2329,10 @@
+ 	      client->name ? client->name : client->interface->name,
+ 	      inet_ntoa(sockaddr_broadcast.sin_addr),
+ 	      ntohs(sockaddr_broadcast.sin_port));
++        
++        /* dhcpauth - begin */
++        sign_packet(DHCPDECLINE, &client -> packet, client -> packet_length);
++        /* dhcpauth - end */
+ 
+ 	/* Send out a packet. */
+ 	result = send_packet(client->interface, NULL, &client->packet,
+@@ -2291,6 +2379,10 @@
+ 	      client -> name ? client -> name : client -> interface -> name,
+ 	      inet_ntoa (destination.sin_addr),
+ 	      ntohs (destination.sin_port));
++        
++        /* dhcpauth - begin */
++        sign_packet(DHCPRELEASE, &client -> packet, client -> packet_length);
++        /* dhcpauth - end */
+ 
+ 	if (fallback_interface) {
+ 		result = send_packet(fallback_interface, NULL, &client->packet,
+@@ -2370,6 +2462,35 @@
+ 	}
+ 	option_dereference(&option, MDL);
+ 
++        /* dhcpauth - begin */
++        if (actions[type[0]].authentication_type) {
++            i = DHO_AUTHENTICATE;
++
++            unsigned char *auth_buffer = malloc(
++                        (DHCP_AUTHENTICATION_OPTION_LENGTH + 
++                                sent_signature_max_length()) * sizeof(char));
++            memset(auth_buffer, 0, DHCP_AUTHENTICATION_OPTION_LENGTH + 
++                                        sent_signature_max_length());
++
++            if (!(option_code_hash_lookup(&option, dhcp_universe.code_hash, 
++                                                &i, 0, MDL) &&
++                  make_const_option_cache(&oc, NULL, auth_buffer, 
++                        DHCP_AUTHENTICATION_OPTION_LENGTH + 
++                                sent_signature_max_length(), option, MDL)))
++                    log_error ("can't make message type.");
++            else {
++                    save_option (&dhcp_universe, *op, oc);
++                    option_cache_dereference (&oc, MDL);
++            }
++            option_dereference(&option, MDL);
++
++            if (auth_buffer) {
++                    free(auth_buffer);
++                    auth_buffer = NULL;
++            }
++        }
++        /* dhcpauth - end */
++        
+ 	if (prl) {
+ 		int len;
+ 
+@@ -2431,6 +2552,7 @@
+ 			     client -> config -> requested_options,
+ 			     &options);
+ 
++        /* dhcpauth - begin */
+ 	/* Set up the option buffer... */
+ 	client -> packet_length =
+ 		cons_options ((struct packet *)0, &client -> packet,
+@@ -2439,11 +2561,12 @@
+ 			      (struct option_state *)0,
+ 			      options,
+ 			      /* scope */ &global_scope,
+-			      /* overload */ 0,
++			      /* overload */ /*0*/ 3,
+ 			      /* terminate */0,
+ 			      /* bootpp    */0,
+ 			      (struct data_string *)0,
+ 			      client -> config -> vendor_space_name);
++        /* dhcpauth - end */
+ 
+ 	option_state_dereference (&options, MDL);
+ 	if (client -> packet_length < BOOTP_MIN_LEN)
+@@ -2505,6 +2628,7 @@
+ 			     client -> config -> requested_options,
+ 			     &client -> sent_options);
+ 
++        /* dhcpauth - begin */
+ 	/* Set up the option buffer... */
+ 	client -> packet_length =
+ 		cons_options ((struct packet *)0, &client -> packet,
+@@ -2513,11 +2637,12 @@
+ 			      (struct option_state *)0,
+ 			      client -> sent_options,
+ 			      /* scope */ &global_scope,
+-			      /* overload */ 0,
++			      /* overload */ /*0*/ 3,
+ 			      /* terminate */0,
+ 			      /* bootpp    */0,
+ 			      (struct data_string *)0,
+ 			      client -> config -> vendor_space_name);
++        /* dhcpauth - end */
+ 
+ 	if (client -> packet_length < BOOTP_MIN_LEN)
+ 		client -> packet_length = BOOTP_MIN_LEN;
+@@ -2583,13 +2708,17 @@
+ 
+ 	/* Consume the options cache into the option buffer. */
+ 	memset (&client -> packet, 0, sizeof (client -> packet));
++        
++        /* dhcpauth - begin */
+ 	client -> packet_length =
+ 		cons_options ((struct packet *)0, &client -> packet,
+-			      (struct lease *)0, client, 0,
++			      (struct lease *)0, client, /*0*/ DHCP_MTU_MAX,
+ 			      (struct option_state *)0, options,
+-			      &global_scope, 0, 0, 0, (struct data_string *)0,
++			      &global_scope, /*0*/ 3, 0, 0, 
++                              (struct data_string *)0,
+ 			      client -> config -> vendor_space_name);
+-
++        /* dhcpauth - end */
++        
+ 	/* Destroy the options cache. */
+ 	option_state_dereference (&options, MDL);
+ 
+@@ -2639,6 +2768,7 @@
+ 			    DHO_DHCP_SERVER_IDENTIFIER);
+ 	make_client_options(client, lease, &request, oc, NULL, NULL, &options);
+ 
++        /* dhcpauth - begin */
+ 	/* Set up the option buffer... */
+ 	client -> packet_length =
+ 		cons_options ((struct packet *)0, &client -> packet,
+@@ -2647,11 +2777,12 @@
+ 			      (struct option_state *)0,
+ 			      options,
+ 			      /* scope */ &global_scope,
+-			      /* overload */ 0,
++			      /* overload */ /*0*/ 3,
+ 			      /* terminate */0,
+ 			      /* bootpp    */0,
+ 			      (struct data_string *)0,
+ 			      client -> config -> vendor_space_name);
++        /* dhcpauth - end */
+ 
+ 	if (client -> packet_length < BOOTP_MIN_LEN)
+ 		client -> packet_length = BOOTP_MIN_LEN;
+@@ -3515,6 +3646,10 @@
+ 	/* Become session leader and get pid... */
+ 	(void) setsid ();
+ 
++        /* dhcpauth - begin */
++#ifndef KEEP_DHCP_CLIENT_CONSOLE_OUTPUT
++        /* dhcpauth - end */
++        
+ 	/* Close standard I/O descriptors. */
+ 	(void) close(0);
+ 	(void) close(1);
+@@ -3525,6 +3660,10 @@
+ 	(void) open("/dev/null", O_RDWR);
+ 	(void) open("/dev/null", O_RDWR);
+ 
++        /* dhcpauth - begin */
++#endif
++        /* dhcpauth - end */
++        
+ 	write_client_pid_file ();
+ 
+ 	IGNORE_RET (chdir("/"));
+@@ -3778,6 +3917,10 @@
+ 
+ static void shutdown_exit (void *foo)
+ {
++        /* dhcpauth - begin */
++        shutdown_client_dhcpauth();
++        /* dhcpauth - end */
++        
+ 	exit (0);
+ }
+ 
+diff -Naur dhcp-4.2.7/client/Makefile.in dhcp-4.2.7+dhcpauth/client/Makefile.in
+--- dhcp-4.2.7/client/Makefile.in	2014-08-07 00:59:22.000000000 +0200
++++ dhcp-4.2.7+dhcpauth/client/Makefile.in	2015-05-02 01:00:00.000000000 +0200
+@@ -378,7 +378,9 @@
+ 
+ dhclient$(EXEEXT): $(dhclient_OBJECTS) $(dhclient_DEPENDENCIES) $(EXTRA_dhclient_DEPENDENCIES) 
+ 	@rm -f dhclient$(EXEEXT)
+-	$(AM_V_CCLD)$(LINK) $(dhclient_OBJECTS) $(dhclient_LDADD) $(LIBS)
++	# dhcpauth - begin
++	$(AM_V_CCLD)$(LINK) $(dhclient_OBJECTS) $(dhclient_LDADD) $(LIBS) -lcrypto
++	# dhcpauth - end
+ 
+ mostlyclean-compile:
+ 	-rm -f *.$(OBJEXT)
+diff -Naur dhcp-4.2.7/common/dhcpauth.c dhcp-4.2.7+dhcpauth/common/dhcpauth.c
+--- dhcp-4.2.7/common/dhcpauth.c	1970-01-01 01:00:00.000000000 +0200
++++ dhcp-4.2.7+dhcpauth/common/dhcpauth.c	2015-05-02 01:00:00.000000000 +0200
+@@ -0,0 +1,2156 @@
++/* dhcpauth.c
++
++   DHCPAuth - DHCP Message Authentication Module */
++
++/*
++ * Copyright (C) 2013-2015 by Daniel Dinu <contact@danieldinu.ro>
++ * 
++ * Permission to use, copy, modify, and/or distribute this software for any
++ * purpose with or without fee is hereby granted, provided that the above
++ * copyright notice and this permission notice appear in all copies.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS.  IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
++ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT
++ * OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++
++ * This product includes software developed by the OpenSSL Project
++ * for use in the OpenSSL Toolkit. (http://www.openssl.org/)
++ *
++ *   Daniel Dinu
++ *   <contact@danieldinu.ro>
++ *   http://www.danieldinu.ro/
++ * 
++ */
++
++
++#include "dhcpd.h"
++
++#include <dirent.h>
++#include <locale.h>
++#include <openssl/pem.h>
++#include <sys/time.h>
++
++
++/* 
++ * Debug the authentication sign packets 
++ * ...
++ */
++#ifndef DEBUG_AUTH_SIGN
++//#define DEBUG_AUTH_SIGN
++#endif
++
++/* 
++ * Debug the authentication verify packets 
++ * ...
++ */
++#ifndef DEBUG_AUTH_VERIFY
++//#define DEBUG_AUTH_VERIFY
++#endif
++
++/* 
++ * Debug the authentication verify result 
++ * ...
++ */
++#ifndef DEBUG_AUTH_VERIFY_RESULT
++//#define DEBUG_AUTH_VERIFY_RESULT
++#endif
++
++/* 
++ * Debug the authentication replay detection 
++ * ...
++ */
++#ifndef DEBUG_REPLAY_DETECTION
++//#define DEBUG_REPLAY_DETECTION
++#endif
++
++
++#define XID_FIELD_START_INDEX           4
++#define SNAME_FIELD_START_INDEX         44
++#define FILE_FIELD_START_INDEX          108
++#define OPTIONS_FIELD_START_INDEX       DHCP_FIXED_NON_UDP + MAGIC_COOKIE_LENGTH
++
++#define XID_FIELD_LENGTH                4
++#define SNAME_FIELD_LENGTH              DHCP_SNAME_LEN
++#define FILE_FIELD_LENGTH               DHCP_FILE_LEN
++#define MAGIC_COOKIE_LENGTH             4
++
++
++#define REPLAY_DETECTION_START_INDEX    5
++#define REPLAY_DETECTION_LENGTH         8
++
++
++#define PKI_PROTOCOL                    2
++#define PGP_PROTOCOL                    3
++#define SHA1_ALGORITHM                  2
++#define SHA2_ALGORITHM                  3
++#define RDM                             0
++
++
++#define MAX_REPLAY_DETECTION_LIST_COUNT 10000
++
++
++
++/*
++ * The PGP RSA signature info length - determined experimentally
++ * ...
++ */ 
++#define PGP_RSA_SIGNATURE_INFO_LENGTH           31
++
++
++#define CONFIGURATION_FILE_LINE_MAX_LENGTH      100
++
++
++static const char *PRIVATE_KEY_FILE = "/var/db/key/key.pem";
++static const char *CERTIFICATE_FILE_PATH = "/var/db/cert/";
++static const char *CONFIGURATION_FILE = "/etc/dhcpauth.conf";
++
++static const char *PRIVATE_KEY_FILE_ACCESS_MODE = "r";
++static const char *CERTIFICATE_FILE_ACCESS_MODE = "r";
++static const char *CONFIGURATION_FILE_ACCESS_MODE = "r";
++
++
++
++static const char *CONFIGURATION_FILE_COMMENT = "#";
++static const char *CONFIGURATION_FILE_SECTION_BEGIN = "[";
++static const char *CONFIGURATION_FILE_SECTION_END = "]";
++static const char *CONFIGURATION_FILE_SECTION = "[]";
++static const char *CONFIGURATION_FILE_KEY_VALUE_SEPARATOR = "=";
++
++static const char *PKI_SECRET_KEY_INFO_SECTION = "PKI_SECRET_KEY_INFO";
++static const char *PGP_SECRET_KEY_INFO_SECTION = "PGP_SECRET_KEY_INFO";
++static const char *SECRET_KEY_FINGERPRINT = "SECRET_KEY_FINGERPRINT";
++static const char *SECRET_KEY_PASSPHRASE_KEY = "SECRET_KEY_PASSPHRASE";
++
++static const char *AUTHENTICATION_TYPE_KEY = "AUTHENTICATION_TYPE";
++static const char *NO_AUTHENTICATION_VALUE = "NO_AUTHENTICATION";
++static const char *PKI_AUTHENTICATION_VALUE = "PKI_AUTHENTICATION";
++static const char *PGP_AUTHENTICATION_VALUE = "PGP_AUTHENTICATION";
++
++
++
++#ifdef ENABLE_STATISTICS
++
++#ifndef USE_STATS
++#define USE_NO_STATS                    0
++#define USE_SECS_STATS                  1
++#define USE_MSECS_STATS                 2
++#define USE_USECS_STATS                 3
++#define USE_STATS                       USE_MSECS_STATS
++#endif
++
++
++#define SECS_TO_MSECS                   1000
++#define SECS_TO_USECS                   1000000
++#define MSECS_TO_USECS                  1000
++
++
++#define STATISTICS_FILE_NAME_MAX_LENGTH 100
++
++static const char *CLIENT_STATISTICS_FILE_NAME = 
++                                                "/var/db/statistics_client.csv";
++static const char *SERVER_STATISTICS_FILE_NAME = 
++                                                "/var/db/statistics_server.csv";
++
++static const char *STATISTICS_FILE_ACCESS_MODE = "a";
++
++static const char *STATISTICS_SEPARATOR = ",";
++
++#endif
++
++
++const char* const DHCP_MESSAGE_NAME[] = {
++    "",
++    "DHCPDISCOVER",
++    "DHCPOFFER",
++    "DHCPREQUEST",
++    "DHCPDECLINE",
++    "DHCPACK",
++    "DHCPNAK",
++    "DHCPRELEASE",
++    "DHCPINFORM",
++    "DHCPLEASEQUERY",
++    "",
++    "DHCPLEASEUNASSIGNED",
++    "DHCPLEASEUNKNOWN",
++    "DHCPLEASEACTIVE"
++};
++
++
++struct action actions[] = {
++    /* Message Type         Authentication Type */
++    { 0,                    NO_AUTHENTICATION },
++    { DHCPDISCOVER,         NO_AUTHENTICATION },
++    { DHCPOFFER,            NO_AUTHENTICATION },
++    { DHCPREQUEST,          NO_AUTHENTICATION },
++    { DHCPDECLINE,          NO_AUTHENTICATION },
++    { DHCPACK,              NO_AUTHENTICATION },
++    { DHCPNAK,              NO_AUTHENTICATION },
++    { DHCPRELEASE,          NO_AUTHENTICATION },
++    { DHCPINFORM,           NO_AUTHENTICATION },
++    { 9,                    NO_AUTHENTICATION },
++    { DHCPLEASEQUERY,       NO_AUTHENTICATION },
++    { DHCPLEASEUNASSIGNED,  NO_AUTHENTICATION },
++    { DHCPLEASEUNKNOWN,     NO_AUTHENTICATION },
++    { DHCPLEASEACTIVE,      NO_AUTHENTICATION }
++};
++
++
++struct replay_detection {
++    char xid[XID_FIELD_LENGTH];
++    struct timeval tv;
++};
++
++struct replay_detection replay_detection_list[MAX_REPLAY_DETECTION_LIST_COUNT];
++int replay_detection_list_count;
++
++
++/*
++ * The PKI private key
++ * ...
++ */
++EVP_PKEY *private_key;
++
++/*
++ * The passphrase to access the PKI private key
++ * ...
++ */
++char private_key_passphrase[CONFIGURATION_FILE_LINE_MAX_LENGTH];
++
++/*
++ * The PKI public key
++ * ...
++ */
++EVP_PKEY *public_key;
++
++
++/*
++ * The fingerprint used to identify the PGP secret key
++ * ...
++ */
++char secret_key_fingerprint[CONFIGURATION_FILE_LINE_MAX_LENGTH];
++
++/*
++ * The passphrase to access the PGP secret key
++ * ...
++ */
++char secret_key_passphrase[CONFIGURATION_FILE_LINE_MAX_LENGTH];
++
++
++/* 
++ * The sent signature maximum length
++ * ...
++ */
++int sent_signature_maximum_length;
++
++/*
++ * The received signature maximum length
++ * ...
++ */
++int received_signature_maximum_length;
++
++
++/*
++ * The authentication option Protocol field value
++ * ...
++ */
++int protocol;
++
++/*
++ * The authentication option Algorithm field value
++ * ...
++ */
++int algorithm;
++
++
++#ifdef ENABLE_STATISTICS
++
++char statistics_file_name[STATISTICS_FILE_NAME_MAX_LENGTH];
++
++struct timeval timeval_total1, timeval_total2;
++struct timeval timeval_auth_sign1, timeval_auth_sign2;
++struct timeval timeval_auth_verify1, timeval_auth_verify2;
++
++int sign_dhcp_packet_size;
++int sign_auth_option_size;
++int verify_dhcp_packet_size;
++int verify_auth_option_size;
++
++#endif
++
++
++/*
++ * Set the Authentication Information field content to 0
++ * ... buffer - the buffer that stores the DHCP packet content
++ * ... dhcp_packet_lenght - the DHCP packet length
++ */
++void clear_authentication_option(buffer, dhcp_packet_length) 
++        unsigned char *buffer;
++        int dhcp_packet_length;
++{
++    /* The index for the DHCP packet */
++    int i = 0;
++    
++    /* The index for the DHCP Authentication Option field */
++    int j = 0;
++    
++    /* The option overload used */
++    int overload = 0;
++    
++    /* Indicates if the fixed length part was preserved */
++    int done = 0;
++    
++    
++    i = OPTIONS_FIELD_START_INDEX;
++    while (i < dhcp_packet_length) {
++        if (DHO_AUTHENTICATE == buffer[i]) {
++            int option_length = buffer[i + 1];
++            i += 2;
++            
++            if (!done) {
++                if (option_length < DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH) {
++                    i += option_length;
++                    j += option_length;
++                } else {
++                    i += DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH;
++                    j = DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH;
++
++                    int t; 
++                    for (t = 0; 
++                            t < option_length - 
++                                DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH; 
++                            t++) {
++                        buffer[i] = 0;
++                        i++;
++                    }
++
++                    done = 1;
++                } 
++            } else {
++                int t; 
++                for (t = 0; t < option_length; t++) {
++                    buffer[i] = 0;
++                    i++;
++                }
++            }
++        } else {
++            if (DHO_DHCP_OPTION_OVERLOAD == buffer[i]) {
++                overload = buffer[i += 2] - '0';
++                i++;
++            } else {
++                if (DHO_PAD == buffer[i] || DHO_END == buffer[i]) {
++                    break;
++                } else {
++                    i += buffer[i + 1] + 2;
++                }
++            }
++        }
++    }
++    
++    if (1 & overload) {
++        /* The file field index in DHCP packet */
++        i = FILE_FIELD_START_INDEX; 
++        while (i < FILE_FIELD_START_INDEX + FILE_FIELD_LENGTH) {
++            if (DHO_AUTHENTICATE == buffer[i]) {
++                int option_length = buffer[i + 1];
++                i += 2;
++                
++                if (!done) {
++                    if (option_length + j < 
++                            DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH) {
++                        i += option_length;
++                        j += option_length;
++                    } else {
++                        int added = DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH - j;
++                        i += added;
++                        j = DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH;
++                        
++                        int t;
++                        for (t = 0; t < option_length - added; t++) {
++                            buffer[i] = 0;
++                            i++;
++                        }
++                        
++                        done = 1;
++                    }
++                } else {
++                    int t;
++                    for (t = 0; t < option_length; t++) {
++                        buffer[i] = 0;
++                        i++;
++                    }
++                }
++            } else {
++                if (DHO_PAD == buffer[i] || DHO_END == buffer[i]) { 
++                     break;
++                } else {
++                     i += buffer[i + 1] + 2;
++                }
++            }
++        }
++    }
++    
++    if (2 & overload) {
++        /* The sname field index in DHCP packet */
++        i = SNAME_FIELD_START_INDEX;
++        while (i < SNAME_FIELD_START_INDEX + SNAME_FIELD_LENGTH) {
++            if (DHO_AUTHENTICATE == buffer[i]) {
++                int option_length = buffer[i + 1];
++                i += 2;
++                
++               if (!done) {
++                    if (option_length + j < 
++                            DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH) {
++                        i += option_length;
++                        j += option_length;
++                    } else {
++                        int added = 
++                                DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH - j;
++                        i += added;
++                        j = DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH;
++                        
++                        int t;
++                        for (t = 0; t < option_length - added; t++) {
++                            buffer[i] = 0;
++                            i++;
++                        }
++                        
++                        done = 1;
++                    }
++                } else {
++                    int t;
++                    for (t = 0; t < option_length; t++) {
++                        buffer[i] = 0;
++                        i++;
++                    }
++                }
++            } else {
++                if (DHO_PAD == buffer[i] || DHO_END == buffer[i]) { 
++                     break;
++                } else {
++                     i += buffer[i + 1] + 2;
++                }
++            }
++        }
++    }
++}
++
++
++/*        
++ * Insert the Replay Detection field into the DHCP Authentication Option
++ * ... buffer - the buffer that stores the DHCP packet
++ * ... dhcp_packet_length - the DHCP packet length
++ */
++void insert_replay_detection_field(buffer, dhcp_packet_length)
++        unsigned char *buffer;
++        int dhcp_packet_length;
++{
++    struct timeval tv;
++    gettimeofday(&tv, NULL);
++    
++    unsigned char *replay_detection_buffer = malloc(REPLAY_DETECTION_LENGTH * 
++                                                        sizeof(char));
++    memcpy(replay_detection_buffer, &tv, REPLAY_DETECTION_LENGTH);
++    
++    
++#ifdef DEBUG_REPLAY_DETECTION
++    printf("Insert Replay Detection: %ld %ld - ", tv.tv_sec, tv.tv_usec);
++    int k;
++    for (k = 0; k < REPLAY_DETECTION_LENGTH; k++) {
++        printf("%02x ", replay_detection_buffer[k]);
++    }
++    printf("\n");
++#endif
++    
++    
++    /* 
++     * Insert into the buffer the Replay Detection field of the DHCP 
++     * ... Authentication Option
++     */
++    
++    /* The index for the DHCP packet */
++    int i = 0;
++    
++    /* 
++     * The index for the Replay Detection Field of the DHCP Authentication 
++     * ... Option 
++     */
++    int j = 0;
++    
++    /* The option overload used */
++    int overload = 0;
++    
++    /* Indicate if the field was inserted into the buffer */
++    int done = 0;
++    
++    i = OPTIONS_FIELD_START_INDEX;
++    while (i < dhcp_packet_length) {
++        if (DHO_AUTHENTICATE == buffer[i]) {
++            int option_length = buffer[i + 1];
++            i += 2;
++            
++            buffer[i++] = protocol;
++            buffer[i++] = algorithm;
++            buffer[i++] = RDM;
++            
++            if (REPLAY_DETECTION_LENGTH <= option_length) {
++                memcpy(buffer + i, replay_detection_buffer, 
++                                REPLAY_DETECTION_LENGTH);
++                done = 1;
++                break;
++            } else {
++                int t;
++                for (t = 0; t < option_length - 3; t++) {
++                    buffer[i] = replay_detection_buffer[t];
++                    i++;
++                }
++                j = t;
++            }
++        } else {
++            if (DHO_DHCP_OPTION_OVERLOAD == buffer[i]) {
++                overload = buffer[i += 2] - '0';
++                i++;
++            } else {
++                if (DHO_PAD == buffer[i] || DHO_END == buffer[i]) {
++                    break;
++                } else {
++                    i += buffer[i + 1] + 2;
++                }
++            }
++        }
++    }
++    
++     if (!done && (1 & overload)) {
++        /* The file field index in DHCP packet */
++        i = FILE_FIELD_START_INDEX; 
++        while (i < FILE_FIELD_START_INDEX + FILE_FIELD_LENGTH) {
++            if (DHO_AUTHENTICATE == buffer[i]) {
++                i += 2;
++                int t;
++                for (t = 0; t < REPLAY_DETECTION_LENGTH - j; t++) {
++                    buffer[i] = replay_detection_buffer[j];
++                    i++;
++                    j++;
++                }
++                done = 1;
++                break;
++            } else {
++                if (DHO_PAD == buffer[i] || DHO_END == buffer[i]) { 
++                     break;
++                } else {
++                     i += buffer[i + 1] + 2;
++                }
++            }
++        }
++    }
++    
++    if (!done && (2 & overload)) {
++        /* The sname field index in DHCP packet */
++        i = SNAME_FIELD_START_INDEX;
++        while (i < SNAME_FIELD_START_INDEX + SNAME_FIELD_LENGTH) {
++            if (DHO_AUTHENTICATE == buffer[i]) {
++                i += 2;
++                int t;
++                for (t = 0; t < REPLAY_DETECTION_LENGTH - j; t++) {
++                    buffer[i] = replay_detection_buffer[j];
++                    i++;
++                    j++;
++                }
++                done = 1;
++                break;
++            } else {
++                if (DHO_PAD == buffer[i] || DHO_END == buffer[i]) { 
++                     break;
++                } else {
++                     i += buffer[i + 1] + 2;
++                }
++            }
++        }
++    }
++    
++    
++    if (replay_detection_buffer) {
++        free(replay_detection_buffer);
++        replay_detection_buffer = NULL;
++    }
++}
++
++/*
++ * Extract the Replay Detection field from the DHCP Authentication Option
++ * ... buffer - the buffer that stores the DHCP packet
++ * ... dhcp_packet_length - the DHCP packet length
++ * Returns: if the replay detection field value is valid return 0, otherwise 
++ * ... return 1
++ */
++int extract_replay_detection_field(buffer, dhcp_packet_length)
++        unsigned char *buffer;
++        int dhcp_packet_length;
++{
++    /* Assume that the replay detection field is valid */
++    int valid_replay_detection_value = 0;        
++            
++    unsigned char *replay_detection_buffer = malloc(REPLAY_DETECTION_LENGTH * 
++                                            sizeof(char));
++    memset(replay_detection_buffer, 0, REPLAY_DETECTION_LENGTH);
++    
++    
++    /*
++     *  Extract from the buffer the Replay Detection field of the DHCP 
++     * ... Authentication Option
++     */
++    
++    /* The index for the DHCP packet */
++    int i = 0;
++    
++    /*
++     *  The index for the Replay Detection Field of the DHCP Authentication 
++     * ... Option
++     */
++    int j = 0;
++    
++    /* The option overload used */
++    int overload = 0;
++    
++    /* Indicates if the field was extracted from the buffer */
++    int done = 0;
++    
++    i = OPTIONS_FIELD_START_INDEX;
++    while (i < dhcp_packet_length) {
++        if (DHO_AUTHENTICATE == buffer[i]) {
++            int option_length = buffer[i + 1];
++            i += 2;
++            
++            /* Protocol, Algorithm & RDM fields */
++            i += 3;
++            
++            if (REPLAY_DETECTION_LENGTH <= option_length) {
++                memcpy(replay_detection_buffer, buffer + i, 
++                                REPLAY_DETECTION_LENGTH);
++                done = 1;
++                break;
++            } else {
++                int t;
++                for (t = 0; t < option_length - 3; t++) {
++                    replay_detection_buffer[t] = buffer[i];
++                    i++;
++                }
++                j = t;
++            }
++        } else {
++            if (DHO_DHCP_OPTION_OVERLOAD == buffer[i]) {
++                overload = buffer[i += 2] - '0';
++                i++;
++            } else {
++                if (DHO_PAD == buffer[i]|| DHO_END == buffer[i]) {
++                    break;
++                } else {
++                    i += buffer[i + 1] + 2;
++                }
++            }
++        }
++    }
++    
++     if (!done && (1 & overload)) {
++        /* The file field index in DHCP packet */
++        i = FILE_FIELD_START_INDEX; 
++        while (i < FILE_FIELD_START_INDEX + FILE_FIELD_LENGTH) {
++            if (DHO_AUTHENTICATE == buffer[i]) {
++                i += 2;
++                int t;
++                for (t = 0; t < REPLAY_DETECTION_LENGTH - j; t++) {
++                    replay_detection_buffer[j] = buffer[i];
++                    i++;
++                    j++;
++                }
++                done = 1;
++                break;
++            } else {
++                if (DHO_PAD == buffer[i] || DHO_END == buffer[i]) { 
++                     break;
++                } else {
++                     i += buffer[i + 1] + 2;
++                }
++            }
++        }
++    }
++    
++    if (!done && (2 & overload)) {
++        /* The sname field index in DHCP packet */
++        i = SNAME_FIELD_START_INDEX;
++        while (i < SNAME_FIELD_START_INDEX + SNAME_FIELD_LENGTH) {
++            if (DHO_AUTHENTICATE == buffer[i]) {
++                i += 2;
++                int t;
++                for (t = 0; t < REPLAY_DETECTION_LENGTH - j; t++) {
++                    replay_detection_buffer[j] = buffer[i];
++                    i++;
++                    j++;
++                }
++                done = 1;
++                break;
++            } else {
++                if (DHO_PAD == buffer[i] || DHO_END == buffer[i]) { 
++                     break;
++                } else {
++                     i += buffer[i + 1] + 2;
++                }
++            }
++        }
++    }
++    
++    
++    long sec = *(long *)replay_detection_buffer;
++    long usec = *(long *)(replay_detection_buffer + 4);
++    
++    
++#ifdef DEBUG_REPLAY_DETECTION
++    printf("Extract Replay Detection: %ld %ld - ", sec, usec);
++    int k;
++    for (k = 0; k < REPLAY_DETECTION_LENGTH; k++) {
++        printf("%02x ", replay_detection_buffer[k]);
++    }
++    printf("\n");
++#endif
++    
++    
++    /* The DHCP packet Transaction Identifier field */
++    unsigned char *xid_buffer = malloc(XID_FIELD_LENGTH * sizeof(char));
++    memcpy(xid_buffer, buffer + XID_FIELD_START_INDEX, XID_FIELD_LENGTH);
++    
++    
++#ifdef DEBUG_REPLAY_DETECTION
++    printf("Search through %d transactions\n", replay_detection_list_count);
++#endif
++    
++    
++    int found = 0;
++    for (i = replay_detection_list_count - 1 ; i >= 0; i--) {
++        if (!memcmp(replay_detection_list[i].xid, xid_buffer, 
++                XID_FIELD_LENGTH)) {
++            
++            
++#ifdef DEBUG_REPLAY_DETECTION
++    printf("Found in the list\n");
++#endif            
++            
++    
++            /* 
++             * Compare the received replay detection value with the stored value
++             */
++            if (replay_detection_list[i].tv.tv_sec > sec || 
++                    (replay_detection_list[i].tv.tv_sec == sec && 
++                        replay_detection_list[i].tv.tv_usec > usec)) {
++                /* Replay detection value received is invalid */
++                valid_replay_detection_value = 1;
++            }
++            
++            /* Save new values */
++            replay_detection_list[i].tv.tv_sec = sec;
++            replay_detection_list[i].tv.tv_usec = usec;
++            
++            found = 1;
++            break;
++        }
++    }
++    
++    if (!found) {
++        
++        
++#ifdef DEBUG_REPLAY_DETECTION
++    printf("Not found in the list\n");
++#endif 
++    
++        if (replay_detection_list_count < MAX_REPLAY_DETECTION_LIST_COUNT - 1) {
++            memcpy(replay_detection_list[replay_detection_list_count].xid, 
++                    xid_buffer, XID_FIELD_LENGTH);
++            replay_detection_list[replay_detection_list_count].tv.tv_sec = sec;
++            replay_detection_list[replay_detection_list_count].tv.tv_usec = 
++                    usec;
++            replay_detection_list_count++;
++        } else {
++            log_fatal("The replay detection list is full. Try to increase the "
++                    "replay detection list capacity from %d to a higher value.", 
++                    MAX_REPLAY_DETECTION_LIST_COUNT);
++        }
++    }
++    
++    if (replay_detection_buffer) {
++        free(replay_detection_buffer);
++        replay_detection_buffer = NULL;
++    }
++    
++    if (xid_buffer) {
++        free(xid_buffer);
++        xid_buffer = NULL;
++    }
++    
++    return valid_replay_detection_value;
++}
++  
++
++/*
++ * Set the DHCP packet options
++ * ... dhcp_packet - The DHCP packet where the options will be set
++ * ... dhcp_packet_length - The DHCP packet length
++ * ... buffer - The options buffer content
++ * ... authentication_information - The authentication information field content
++ */
++void set_dhcp_packet_options(dhcp_packet, dhcp_packet_length, buffer, 
++                                authentication_information)
++        struct dhcp_packet *dhcp_packet;
++        int dhcp_packet_length;
++        unsigned char *buffer;
++        unsigned char *authentication_information;
++{
++    /* The index for the DHCP packet */
++    int i = 0;
++    
++    /* The option overload used */
++    int overload = 0;
++    
++    /* The index for the digest */
++    int j = 0;
++    
++    int k = 0;
++    
++    /* Indicates if the fixed length part was preserved */
++    int done = 0;
++    
++    i = OPTIONS_FIELD_START_INDEX;
++    while (i < dhcp_packet_length) {
++        if (DHO_AUTHENTICATE == buffer[i]) {
++            int option_length = buffer[i + 1];
++            i += 2;
++            
++            if (!done) {
++                if (option_length < DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH) {
++                    k += option_length;
++                    
++                    int t;
++                    for (t = 0; t < option_length; t++) {
++                        dhcp_packet -> options[i - DHCP_FIXED_NON_UDP] = 
++                                buffer[i];
++                        i++;
++                    }
++                } else {
++                    k = DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH;
++                    
++                    int t;
++                    for (t = 0; t < DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH; 
++                            t++) {
++                         dhcp_packet -> options[i - DHCP_FIXED_NON_UDP] = 
++                                buffer[i];
++                         i++;
++                    }
++                    
++                    for (t = 0; 
++                            t < option_length - 
++                                    DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH; 
++                            t++) {
++                        dhcp_packet -> options[i - DHCP_FIXED_NON_UDP] = 
++                                authentication_information[j];
++                        i++;
++                        j++;
++                    }
++
++                    done = 1;
++                } 
++            } else {
++                int t; 
++                for (t = 0; t < option_length; t++) {
++                    dhcp_packet -> options[i - DHCP_FIXED_NON_UDP] = 
++                            authentication_information[j];
++                    i++;
++                    j++;
++                }
++            }
++        } else {
++            if (DHO_DHCP_OPTION_OVERLOAD == buffer[i]) {
++                overload = buffer[i += 2] - '0';
++                i++;
++            } else {
++                if (DHO_PAD == buffer[i] || DHO_END == buffer[i]) {
++                    break;
++                } else {
++                    i += buffer[i + 1] + 2;
++                }
++            }
++        }
++    }
++    
++    if (1 & overload) {
++        /* The file field index in DHCP packet */
++        i = FILE_FIELD_START_INDEX; 
++        while (i < FILE_FIELD_START_INDEX + FILE_FIELD_LENGTH) {
++            if (DHO_AUTHENTICATE == buffer[i]) {
++                int option_length = buffer[i + 1];
++                i += 2;
++                
++                if (!done) {
++                    if (option_length + k < 
++                            DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH) {
++                        k += option_length;
++                        
++                        int t;
++                        for (t = 0; t < option_length; t++) {
++                             dhcp_packet -> file[i - FILE_FIELD_START_INDEX] = 
++                                     buffer[i];
++                             i++;
++                        }
++                        
++                    } else {
++                        int added = 
++                                DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH - k;
++                        k = DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH;
++                        
++                        int t;
++                        for (t=0; t < added; t++) {
++                            dhcp_packet -> file[i - FILE_FIELD_START_INDEX] = 
++                                    buffer[i];
++                            i++;
++                        }
++                        
++                        for (t = 0; t < option_length - added; t++) {
++                            dhcp_packet -> file[i - FILE_FIELD_START_INDEX] = 
++                                    authentication_information[j];
++                            i++;
++                            j++;
++                        }
++                        
++                        done = 1;
++                    }
++                } else {
++                    int t;
++                    for (t = 0; t < option_length; t++) {
++                        dhcp_packet -> file[i - FILE_FIELD_START_INDEX] = 
++                                authentication_information[j];
++                        i++;
++                        j++;
++                    }
++                }
++            } else {
++                if (DHO_PAD == buffer[i] || DHO_END == buffer[i]) { 
++                     break;
++                } else {
++                     i += buffer[i + 1] + 2;
++                }
++            }
++        }
++    }
++    
++    if (2 & overload) {
++        /* The sname field index in DHCP packet */
++        i = SNAME_FIELD_START_INDEX;
++        while (i < SNAME_FIELD_START_INDEX + SNAME_FIELD_LENGTH) {
++            if (DHO_AUTHENTICATE == buffer[i]) {
++                int option_length = buffer[i + 1];
++                i += 2;
++                
++                if (!done) {
++                    if (option_length + k < 
++                            DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH) {
++                        i += option_length;
++                        k += option_length;
++                    } else {
++                        int added = 
++                                DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH - k;
++                        i += added;
++                        k = DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH;
++                        
++                        int t;
++                        for (t = 0; t < option_length - added; t++) {
++                            dhcp_packet -> sname[i - SNAME_FIELD_START_INDEX] = 
++                                    authentication_information[j];
++                            i++;
++                            j++;
++                        }
++                        
++                        done = 1;
++                    }
++                } else {
++                    int t;
++                    for (t = 0; t < option_length; t++) {
++                        dhcp_packet -> sname[i - SNAME_FIELD_START_INDEX] = 
++                                authentication_information[j];
++                        i++;
++                        j++;
++                    }
++                }
++            } else {
++                if (DHO_PAD == buffer[i] || DHO_END == buffer[i]) { 
++                     break;
++                } else {
++                     i += buffer[i + 1] + 2;
++                }
++            }
++        }
++    }
++}  
++        
++        
++/*
++ * Sets the password to access the PKI secret key
++ * ... buf - A buffer that the password or passphrase will be written into
++ * ... size - The size of the password buffer
++ * ... rwflag - Indicates whether the password or passphrase will be used to 
++ * ... ... encrypt or decrypt the PEM data. When writing PEM data, this argument
++ * ... ... will be nonzero. When reading PEM data, this argument will be zero
++ * ... userdata - Application-specific. It is passed from the function that 
++ * caused the password callback function to be called
++ * Returns: The number of characters written into the password buffer buf
++ */
++int set_password(buf, size, rwflag, userdata)
++        char *buf;
++        int size;
++        int rwflag;
++        void *userdata;
++{
++    if (strlen(private_key_passphrase) > size) {
++        return 0;
++    }
++    
++    strcpy(buf, private_key_passphrase);
++    memset(private_key_passphrase, 0, CONFIGURATION_FILE_LINE_MAX_LENGTH);
++    
++    return strlen(buf);
++}    
++
++
++/*        
++ * Read the private key used for signing the DHCP packet
++ * ...
++ */
++void read_private_key() 
++{
++    FILE *fp = fopen(PRIVATE_KEY_FILE, PRIVATE_KEY_FILE_ACCESS_MODE);
++    if (NULL == fp) {
++        log_fatal("Can not open the private key file %s", PRIVATE_KEY_FILE);
++        return;
++    }
++    
++    OpenSSL_add_all_algorithms();
++    
++    private_key = PEM_read_PrivateKey(fp, NULL, set_password, NULL);
++    fclose(fp);
++    
++    if (NULL == private_key) {
++        log_fatal("Can not read the private key from the private key file %s", 
++                    PRIVATE_KEY_FILE);
++        return;
++    }
++    
++    if (private_key) {
++        sent_signature_maximum_length = EVP_PKEY_size(private_key);
++        
++        protocol = PKI_PROTOCOL;
++        algorithm = SHA2_ALGORITHM;
++    }
++}
++
++
++/*        
++ * Free the private key used for signing the DHCP packet
++ * ...
++ */
++void free_private_key()
++{
++    if(NULL != private_key)
++    {
++        EVP_PKEY_free(private_key);
++    }
++}
++
++/*        
++ * Free the public key used for verifying the DHCP packet
++ * ...
++ */
++void free_public_key()
++{
++    if(NULL != public_key)
++    {
++        EVP_PKEY_free(public_key);
++    }
++}
++
++
++/*
++ * Initialize PGP
++ * ...
++ */
++void init_pgp()      
++{
++	
++}
++
++/* 
++ * Read the secret key using the given secret key fingerprint
++ * ...
++ */
++void read_secret_key() 
++{
++    
++}
++
++
++/* 
++ * Free the secret key
++ * ...
++ */
++void free_secret_key()
++{
++    
++}
++
++       
++/*
++ * Gets the maximum length of the signature that will be sent
++ * Returns: the sent signature maximum length
++ */
++int sent_signature_max_length()
++{
++    return sent_signature_maximum_length;
++}
++
++
++/*
++ * Sign the given input data using PKI
++ * ... data - The data to be signed
++ * ... data_length - The length of the data to be signed
++ * ... signature - The resulted signature of the data
++ * ... signature_length - The length of the resulted signature
++ * Returns: if the signature was created return 0, else return 1
++ */
++int pki_sign(data, data_length, signature, signature_length)
++        unsigned char *data;
++        int data_length;
++        unsigned char *signature;
++        int *signature_length;
++{
++    EVP_MD_CTX md_ctx;
++    
++    if (sent_signature_max_length() <= SHA512_DIGEST_LENGTH) {
++        EVP_SignInit(&md_ctx, EVP_sha256());
++    } else {
++        EVP_SignInit(&md_ctx, EVP_sha512());
++    }
++    EVP_SignUpdate(&md_ctx, data, data_length);
++
++    int return_code = EVP_SignFinal(&md_ctx, signature, 
++                                        (unsigned int*) signature_length, 
++                                        private_key);
++
++    if (1 != return_code) {
++        log_error("Error on PKI signature creation");
++        return 1;
++    }
++
++    return 0; 
++}
++
++/*
++ * Sign the given input data using PGP
++ * ... data - The data to be signed
++ * ... data_length - The length of the data to be signed
++ * ... signature - The resulted signature of the data
++ * ... signature_length - The length of the resulted signature
++ * Returns: if the signature was created return 0, else return 1
++ */
++int pgp_sign(data, data_length, signature, signature_length)
++        unsigned char *data;
++        int data_length;
++        unsigned char *signature;
++        int *signature_length;
++{
++	return 1;
++}
++
++/*
++ * Sign the given input data
++ * ... dhcp_message_type - the DHCP packet message type
++ * ... data - The data to be signed
++ * ... data_length - The length of the data to be signed
++ * ... signature - The resulted signature of the data
++ * ... signature_length - The length of the resulted signature
++ * Returns: if the signature was created return 0, else return 1
++ */
++int sign(dhcp_message_type, data, data_length, signature, signature_length)
++        int dhcp_message_type;
++        unsigned char *data;
++        int data_length;
++        unsigned char *signature;
++        int *signature_length;
++{
++    if (PKI_AUTHENTICATION == actions[dhcp_message_type].authentication_type) {
++        return pki_sign(data, data_length, signature, signature_length);
++    }
++
++    if (PGP_AUTHENTICATION == actions[dhcp_message_type].authentication_type) {
++        return pgp_sign(data, data_length, signature, signature_length);
++    }
++    
++    return 1;
++}
++   
++
++/*
++ * Verify the given signature using PKI
++ * ... data - The data that was signed
++ * ... data_length - The length of the data that was signed
++ * ... signature - The signature to be verified
++ * ... signature_length - The length of the signature that must be verified
++ * Returns: if the signature was verified return 0, else return 1
++ */
++int pki_verify_signature(data, data_length, signature, signature_length)
++        unsigned char *data;
++        int data_length;
++        unsigned char *signature;
++        int signature_length;
++{
++    DIR *dir;
++    struct dirent *ent;
++    
++    EVP_MD_CTX md_ctx;
++    
++    char *certificate_file;
++    int certificate_file_length;
++    
++    int return_code;
++    
++    return_code = 0;
++    
++    if (NULL != (dir = opendir(CERTIFICATE_FILE_PATH))) {
++        while (NULL != (ent = readdir(dir))) {
++            if (!strcmp(".", ent->d_name)) {
++                continue;
++            }
++            if (!strcmp("..", ent->d_name)) {
++                continue;
++            }
++            if (DT_LNK != ent->d_type && DT_REG != ent->d_type) {
++                continue;
++            }
++            
++            certificate_file_length = strlen(CERTIFICATE_FILE_PATH) + 
++                                                strlen(ent->d_name) + 1;
++            certificate_file = malloc(certificate_file_length * sizeof(char));
++            memset(certificate_file, 0, certificate_file_length);
++            strcpy(certificate_file, CERTIFICATE_FILE_PATH);
++            strcat(certificate_file, ent->d_name);
++            
++            FILE *fp = fopen(certificate_file, CERTIFICATE_FILE_ACCESS_MODE);
++            
++            if (certificate_file) {
++                free(certificate_file);
++                certificate_file = NULL;
++            }
++            
++            if (NULL == fp) {
++                log_error("Can not open the certificate file %s", ent->d_name);
++                continue;
++            }
++
++            X509 *x509 = PEM_read_X509(fp, NULL, NULL, NULL);
++            fclose(fp);
++
++            if (NULL == x509) {
++                log_error("Can not read the X.509 certificate from the "
++                            "certificate file %s", ent->d_name);
++                continue;
++            }
++
++            EVP_PKEY_free(public_key);
++            public_key = X509_get_pubkey(x509);
++            X509_free(x509);
++
++            if (NULL == public_key) {
++                log_error("Cannot read public key from X.509 certificate from "
++                            "the certificate file %s", ent->d_name);
++                continue;
++            }
++            
++            if (received_signature_maximum_length <= SHA512_DIGEST_LENGTH) {
++                EVP_SignInit(&md_ctx, EVP_sha256());
++            } else {
++                EVP_SignInit(&md_ctx, EVP_sha512());
++            }
++            
++            EVP_VerifyUpdate(&md_ctx, data, data_length);
++
++            return_code = EVP_VerifyFinal(&md_ctx, signature, 
++                                            (unsigned int) signature_length, 
++                                            public_key);
++            
++            if (1 == return_code) {
++                /* signature is valid */
++                break;
++            }
++        }
++        
++        closedir (dir);
++    } else {
++        /* could not open directory */
++        log_error("Could not open directory %s", CERTIFICATE_FILE_PATH);
++    }
++    
++    if (1 != return_code) {
++        log_error("Error on PKI signature verification");
++        return 1;
++    }
++
++    return 0;
++}
++
++/*
++ * Verify the given signature using PGP
++ * ... data - The data that was signed
++ * ... data_length - The length of the data that was signed
++ * ... signature - The signature to be verified
++ * ... signature_length - The length of the signature that must be verified
++ * Returns: if the signature was verified return 0, else return 1
++ */
++int pgp_verify_signature(data, data_length, signature, signature_length)
++        unsigned char *data;
++        int data_length;
++        unsigned char *signature;
++        int signature_length;
++{
++	return 1; 
++}
++ 
++/*
++ * Verify the given signature
++ * ... dhcp_message_type - the DHCP packet message type
++ * ... data - The data that was signed
++ * ... data_length - The length of the data that was signed
++ * ... signature - The signature to be verified
++ * ... signature_length - The length of the signature that must be verified
++ * Returns: if the signature was verified return 0, else return 1
++ */
++int verify_signature(dhcp_message_type, data, data_length, signature, 
++                        signature_length)
++        int dhcp_message_type;
++        unsigned char *data;
++        int data_length;
++        unsigned char *signature;
++        int signature_length;
++{
++    if (PKI_AUTHENTICATION == actions[dhcp_message_type].authentication_type) {
++        return pki_verify_signature(data, data_length, signature, 
++                                        signature_length);
++    }
++    
++    if (PGP_AUTHENTICATION == actions[dhcp_message_type].authentication_type) {
++        return pgp_verify_signature(data, data_length, signature, 
++                                        signature_length);
++    }
++    
++    return 1;
++}
++
++
++/*
++ * Sign the given DHCP packet
++ * ... dhcp_message_type - the DHCP packet message type
++ * ... dhcp_packet - the DHCP packet to sign
++ * ... dhcp_packet_length - the length of the DHCP packet to sign
++ */
++void sign_packet(dhcp_message_type, dhcp_packet, dhcp_packet_length)
++        int dhcp_message_type;
++        struct dhcp_packet *dhcp_packet;
++        int dhcp_packet_length;
++{            
++#ifdef DEBUG_AUTH_SIGN
++    printf("Before sign_packet - message: %s\n", 
++                DHCP_MESSAGE_NAME[dhcp_message_type]);
++    dump_raw((unsigned char *)dhcp_packet, dhcp_packet_length);
++#endif
++    
++    if (!actions[dhcp_message_type].authentication_type) {
++        return;
++    }
++    
++#ifdef ENABLE_STATISTICS
++    if (DHCPREQUEST == dhcp_message_type || DHCPACK == dhcp_message_type) {
++        sign_dhcp_packet_size = dhcp_packet_length + DHCP_UDP_OVERHEAD;
++        sign_auth_option_size = DHCP_AUTHENTICATION_OPTION_LENGTH + 
++                                sent_signature_max_length();
++    }
++#endif
++    
++    /* Make a local copy of the DHCP packet */
++    struct dhcp_packet *dhcp_packet_copy;
++    dhcp_packet_copy = new_dhcp_packet(MDL);
++    memcpy(dhcp_packet_copy, dhcp_packet, dhcp_packet_length);
++    
++    /* Set to 0 the fields that can be modified by relay agents */
++    dhcp_packet_copy -> hops = 0;
++    memset(&(dhcp_packet_copy -> giaddr), 0, 
++                sizeof(dhcp_packet_copy -> giaddr));
++    
++    /* Get the DHCP packet content */
++    unsigned char *buffer = malloc(dhcp_packet_length * sizeof(char));
++    memset(buffer, 0, dhcp_packet_length);
++    memcpy(buffer, (unsigned char*)dhcp_packet_copy, dhcp_packet_length);
++    
++    /* Destroy the local packet copy */
++    free_dhcp_packet(dhcp_packet_copy, MDL);
++    
++    
++    /* Set the authentication option content to 0 */
++    clear_authentication_option(buffer, dhcp_packet_length);
++    
++    
++    /* Set the Protocol, Algorithm, RDM & Replay Detection fields */
++    insert_replay_detection_field(buffer, dhcp_packet_length);
++    
++    
++    /* Sign the DHCP packet */
++    unsigned char *signature = malloc((SIGNATURE_LENGTH_FIELD_LENGTH + 
++                                        sent_signature_max_length()) * 
++                                                sizeof(char));
++    memset(signature, 0, SIGNATURE_LENGTH_FIELD_LENGTH + 
++                                sent_signature_max_length());
++    int signature_length;
++    sign(dhcp_message_type, buffer, dhcp_packet_length, signature + 
++                SIGNATURE_LENGTH_FIELD_LENGTH, &signature_length);
++    signature[0] = signature_length / 100;
++    signature[1] = signature_length % 100;
++    
++    
++    /* Set the DHCP packet options */
++    set_dhcp_packet_options(dhcp_packet, dhcp_packet_length, buffer, signature);
++    
++    
++    if (buffer) {
++        free(buffer);
++        buffer = NULL;
++    }
++    
++    if (signature) {
++        free(signature);
++        signature = NULL;
++    }
++    
++#ifdef DEBUG_AUTH_SIGN
++    printf("After sign_packet - message: %s\n", 
++        DHCP_MESSAGE_NAME[dhcp_message_type]);
++    dump_raw((unsigned char *)dhcp_packet, dhcp_packet_length);
++#endif
++}
++
++/*
++ * Verify the incoming packet signature
++ * ... packet - the incoming packet
++ * Returns: if the packet signature is valid return 0, else return 1
++ */
++int verify_packet(packet) 
++        struct packet *packet;
++{
++#ifdef DEBUG_AUTH_VERIFY
++    printf("Packet to verify - message: %s\n", 
++                DHCP_MESSAGE_NAME[packet -> packet_type]);
++    dump_raw((unsigned char *)packet -> raw, packet -> packet_length);
++#endif
++    
++    if (!actions[packet -> packet_type].authentication_type) {
++#ifdef DEBUG_AUTH_VERIFY_RESULT
++        printf("Valid %s\n", DHCP_MESSAGE_NAME[packet -> packet_type]);
++#endif
++        return 0;
++    }
++    
++    /* Make a local copy of the DHCP packet */
++    struct dhcp_packet *dhcp_packet_copy;
++    dhcp_packet_copy = new_dhcp_packet(MDL);
++    memcpy(dhcp_packet_copy, packet -> raw, packet -> packet_length);
++   
++    /* Set to 0 the fields that can be modified by relay agents */
++    dhcp_packet_copy -> hops = 0;
++    memset(&(dhcp_packet_copy -> giaddr), 0, 
++                sizeof(dhcp_packet_copy -> giaddr));
++    
++    /* Get the DHCP packet content */
++    unsigned char *buffer = malloc(packet -> packet_length * sizeof(char));
++    memset(buffer, 0, packet -> packet_length);
++    memcpy(buffer, (unsigned char*)dhcp_packet_copy, packet -> packet_length);
++    
++    /* Destroy the local packet copy */
++    free_dhcp_packet(dhcp_packet_copy, MDL);
++    
++    
++    /* Set the authentication option content to 0 */
++    clear_authentication_option(buffer, packet -> packet_length);
++    
++    
++    /* Get the Replay Detection field */
++    if (extract_replay_detection_field(buffer, packet -> packet_length)) {
++        if (buffer) {
++            free(buffer); 
++            buffer = NULL;
++        }
++        
++        /* Signature is invalid */
++#ifdef DEBUG_AUTH_VERIFY_RESULT
++        printf("Invalid %s\n", DHCP_MESSAGE_NAME[packet -> packet_type]);
++#endif
++        return 1;
++    }
++    
++    
++    /* Get the authentication option content */
++    struct option_cache *oc;
++    struct data_string ds;
++    
++    /* Assume that the signature is valid */
++    int verify_signature_result = 0;
++    
++    oc = lookup_option(&dhcp_universe, packet -> options, DHO_AUTHENTICATE);
++    memset(&ds, 0, sizeof(ds));
++    if (oc &&
++            evaluate_option_cache(&ds, 
++                packet, 
++                (struct lease *)0, 
++                (struct client_state *)0, 
++                packet -> options, 
++                (struct option_state*)0,
++                &global_scope,
++                oc,
++                MDL)) {
++        
++        received_signature_maximum_length = ds.len - 
++                DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH - 
++                SIGNATURE_LENGTH_FIELD_LENGTH;
++        
++	int signature_length = 
++		*(ds.data + DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH) * 100 + 
++		*(ds.data + DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH + 1);
++        
++        verify_signature_result = verify_signature(packet -> packet_type, 
++                buffer, packet -> packet_length, 
++                ds.data + DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH + 
++                                SIGNATURE_LENGTH_FIELD_LENGTH,
++                signature_length);
++    } else {        
++        /* No authentication option received */
++        verify_signature_result = 1;
++    }
++    
++    if (buffer) {
++       free(buffer); 
++       buffer = NULL;
++    }
++    
++    /* Free the data_string */
++    data_string_forget (&ds, MDL);
++    
++#ifdef ENABLE_STATISTICS
++    if (DHCPREQUEST == packet -> packet_type || 
++            DHCPACK == packet -> packet_type) {
++        verify_dhcp_packet_size = packet -> packet_length + DHCP_UDP_OVERHEAD;
++        verify_auth_option_size = DHCP_AUTHENTICATION_OPTION_LENGTH + 
++                        received_signature_maximum_length;
++    }
++#endif
++    
++    /* Return verify signature result */
++#ifdef DEBUG_AUTH_VERIFY_RESULT
++    if (verify_signature_result) {
++        printf("Invalid %s\n", DHCP_MESSAGE_NAME[packet -> packet_type]);
++    } else {
++        printf("Valid %s\n", DHCP_MESSAGE_NAME[packet -> packet_type]);
++    }
++#endif
++    return verify_signature_result;
++}
++        
++        
++#ifdef ENABLE_STATISTICS
++        
++/*
++ * Initialize the statistics file
++ * ... file_name - the statistics file name
++ */ 
++void init_statistics_file(file_name)
++        char *file_name;
++{
++    memset(statistics_file_name, 0, STATISTICS_FILE_NAME_MAX_LENGTH);
++    memcpy(statistics_file_name, file_name, strlen(file_name));
++    
++    FILE *statistics_file = fopen(statistics_file_name, 
++                                        STATISTICS_FILE_ACCESS_MODE);
++    
++    if (NULL == statistics_file) {
++        log_fatal("Can not initialize the statistics file: %s", 
++                        statistics_file_name);
++        return;
++    }
++  
++#if defined(USE_STATS) && (USE_SECS_STATS == USE_STATS)
++    fprintf(statistics_file, "\"Total time (secs)\"%s\"Auth sign time (secs)"
++            "\"%s\"Auth verify time (secs)\"%s\"Sign packet length (bytes)"
++            "\"%s\"Sign auth length (bytes)\"%s\"Verify packet length (bytes)"
++            "\"%s\"Verify auth length (bytes)\"\n", STATISTICS_SEPARATOR, 
++            STATISTICS_SEPARATOR, STATISTICS_SEPARATOR, STATISTICS_SEPARATOR, 
++            STATISTICS_SEPARATOR, STATISTICS_SEPARATOR);
++#endif
++    
++#if defined(USE_STATS) && (USE_MSECS_STATS == USE_STATS)
++    fprintf(statistics_file, "\"Total time (msecs)\"%s\"Auth sign time (msecs)"
++            "\"%s\"Auth verify time (msecs)\"%s\"Sign packet length (bytes)"
++            "\"%s\"Sign auth length (bytes)\"%s\"Verify packet length (bytes)"
++            "\"%s\"Verify auth length (bytes)\"\n", STATISTICS_SEPARATOR, 
++            STATISTICS_SEPARATOR, STATISTICS_SEPARATOR, STATISTICS_SEPARATOR, 
++            STATISTICS_SEPARATOR, STATISTICS_SEPARATOR);
++#endif
++    
++#if defined(USE_STATS) && (USE_USECS_STATS == USE_STATS)
++    fprintf(statistics_file, "\"Total time (usecs)\"%s\"Auth sign time (usecs)"
++            "\"%s\"Auth verify time (usecs)\"%s\"Sign packet length (bytes)"
++            "\"%s\"Sign auth length (bytes)\"%s\"Verify packet length (bytes)"
++            "\"%s\"Verify auth length (bytes)\"\n", STATISTICS_SEPARATOR, 
++            STATISTICS_SEPARATOR, STATISTICS_SEPARATOR, STATISTICS_SEPARATOR, 
++            STATISTICS_SEPARATOR, STATISTICS_SEPARATOR);
++#endif
++    
++    fclose(statistics_file);
++}
++
++/*
++ * Write the statistics to the statistics file
++ * ...
++ */
++void write_statistics()
++{
++    FILE *statistics_file = fopen(statistics_file_name, 
++                                    STATISTICS_FILE_ACCESS_MODE);
++    
++    if (NULL == statistics_file) {
++        log_fatal("Can not open the statistics file: %s", statistics_file_name);
++        return;
++    }
++    
++#if defined(USE_STATS) && (USE_SECS_STATS == USE_STATS)
++    double total_time = (double)(timeval_total2.tv_usec - 
++                                    timeval_total1.tv_usec) / SECS_TO_USECS + 
++                        (double)(timeval_total2.tv_sec - timeval_total1.tv_sec);
++    
++    double auth_sign_time = (double)(timeval_auth_sign2.tv_usec - 
++                                        timeval_auth_sign1.tv_usec) / 
++                                            SECS_TO_USECS + 
++                            (double)(timeval_auth_sign2.tv_sec - 
++                                        timeval_auth_sign1.tv_sec);
++    
++    double auth_verify_time = (double)(timeval_auth_verify2.tv_usec - 
++                                        timeval_auth_verify1.tv_usec) / 
++                                            SECS_TO_USECS + 
++                                (double)(timeval_auth_verify2.tv_sec - 
++                                        timeval_auth_verify1.tv_sec);
++    
++    
++    fprintf(statistics_file, "\"%lf\"%s\"%lf\"%s\"%lf\"%s\"%d\"%s\"%d\"%s\"%d"
++                "\"%s\"%d\"\n", 
++                total_time, STATISTICS_SEPARATOR,  
++                auth_sign_time, STATISTICS_SEPARATOR,
++                auth_verify_time, STATISTICS_SEPARATOR,
++                sign_dhcp_packet_size, STATISTICS_SEPARATOR, 
++                sign_auth_option_size, STATISTICS_SEPARATOR
++                verify_dhcp_packet_size, STATISTICS_SEPARATOR, 
++                verify_auth_option_size)
++#endif
++            
++#if defined(USE_STATS) && (USE_MSECS_STATS == USE_STATS)
++    double total_time = (double)(timeval_total2.tv_usec - 
++                                    timeval_total1.tv_usec) / MSECS_TO_USECS + 
++                        (double)(timeval_total2.tv_sec - 
++                                    timeval_total1.tv_sec) * SECS_TO_MSECS;
++    
++    double auth_sign_time = (double)(timeval_auth_sign2.tv_usec - 
++                                timeval_auth_sign1.tv_usec) / MSECS_TO_USECS + 
++                            (double)(timeval_auth_sign2.tv_sec - 
++                                timeval_auth_sign1.tv_sec) * SECS_TO_MSECS;
++    
++    double auth_verify_time = (double)(timeval_auth_verify2.tv_usec - 
++                                timeval_auth_verify1.tv_usec) / MSECS_TO_USECS + 
++                                (double)(timeval_auth_verify2.tv_sec - 
++                                    timeval_auth_verify1.tv_sec) * 
++                                        SECS_TO_MSECS;
++    
++    
++    fprintf(statistics_file, "\"%lf\"%s\"%lf\"%s\"%lf\"%s\"%d\"%s\"%d\"%s\"%d"
++                "\"%s\"%d\"\n", 
++                total_time, STATISTICS_SEPARATOR, 
++                auth_sign_time, STATISTICS_SEPARATOR, 
++                auth_verify_time, STATISTICS_SEPARATOR, 
++                sign_dhcp_packet_size, STATISTICS_SEPARATOR,
++                sign_auth_option_size, STATISTICS_SEPARATOR,
++                verify_dhcp_packet_size, STATISTICS_SEPARATOR,
++                verify_auth_option_size);
++#endif
++    
++#if defined(USE_STATS) && (USE_USECS_STATS == USE_STATS)
++    long total_time = (long)(timeval_total2.tv_usec - timeval_total1.tv_usec) + 
++                        (long)(timeval_total2.tv_sec - timeval_total1.tv_sec) * 
++                                SECS_TO_USECS;
++    
++    long auth_sign_time = (long)(timeval_auth_sign2.tv_usec - 
++                                timeval_auth_sign1.tv_usec) + 
++                            (long)(timeval_auth_sign2.tv_sec - 
++                                    timeval_auth_sign1.tv_sec) * SECS_TO_USECS;
++    
++    long auth_verify_time = (long)(timeval_auth_verify2.tv_usec - 
++                                timeval_auth_verify1.tv_usec) + 
++                            (long)(timeval_auth_verify2.tv_sec - 
++                                timeval_auth_verify1.tv_sec) * SECS_TO_USECS;
++    
++    
++    fprintf(statistics_file, "\"%ld\"%s\"%ld\"%s\"%ld\"%s\"%d\"%s\"%d\"%s\"%d"
++                "\"%s\"%d\"\n", 
++                total_time, STATISTICS_SEPARATOR, 
++                auth_sign_time, STATISTICS_SEPARATOR, 
++                auth_verify_time, STATISTICS_SEPARATOR, 
++                sign_dhcp_packet_size, STATISTICS_SEPARATOR,
++                sign_auth_option_size, STATISTICS_SEPARATOR,
++                verify_dhcp_packet_size, STATISTICS_SEPARATOR,
++                verify_auth_option_size);
++#endif
++    
++    fclose(statistics_file);
++}
++
++/*
++ * Initialize the authentication statistics
++ * ...
++ */
++void init_auth_statistics()
++{
++    struct timeval t;
++    gettimeofday(&t, NULL);
++    
++    timeval_auth_sign1 = t;
++    timeval_auth_sign2 = t;
++    timeval_auth_verify1 = t;
++    timeval_auth_verify2 = t;
++    
++    sign_dhcp_packet_size = 0;
++    sign_auth_option_size = 0;
++    verify_dhcp_packet_size = 0;
++    verify_auth_option_size = 0;
++}
++
++/*
++ * Start the total timer
++ * ...
++ */
++void start_total_timer()
++{
++    /* Initialize the authentication statistics */
++    init_auth_statistics();
++    
++    gettimeofday(&timeval_total1, NULL);
++}
++
++/*
++ * Stop the total timer
++ * ...
++ */
++void stop_total_timer()
++{
++    gettimeofday(&timeval_total2, NULL);
++    
++    /* Write statistics to statistics file */
++    write_statistics();
++}
++
++/*
++ * Start the authentication sign timer
++ * ...
++ */
++void start_auth_sign_timer()
++{
++    gettimeofday(&timeval_auth_sign1, NULL);
++}
++
++/*
++ * Stop the authentication sign timer
++ * ...
++ */
++void stop_auth_sign_timer()
++{
++    gettimeofday(&timeval_auth_sign2, NULL);
++}
++
++/*
++ * Start the authentication verify timer
++ * ...
++ */
++void start_auth_verify_timer()
++{
++    gettimeofday(&timeval_auth_verify1, NULL);
++}
++
++/*
++ * Stop the authentication verify timer
++ * ...
++ */
++void stop_auth_verify_timer()
++{
++    gettimeofday(&timeval_auth_verify2, NULL);
++}
++
++#endif
++
++
++/*
++ * Trim the given string leading and trailing spaces
++ * ... s - the string to be trimmed
++ */
++void trim(s)
++        char *s;
++{
++    char *pch;
++    int length;
++    
++    pch = strstr(s, CONFIGURATION_FILE_COMMENT);
++    if (NULL != pch) {
++        s[(int)(pch - s)] = 0;
++    }
++    
++    
++    pch = s;
++    length = strlen(pch);
++    while (length > 0 && isspace(pch[length - 1])) {
++        pch[--length] = 0;
++    }
++    
++    while (*pch && isspace(*pch)) {
++        ++pch;
++        --length;
++    }
++    
++    memmove(s, pch, length + 1);
++}
++ 
++/*
++ * Remove spaces from the given string
++ * ... s - the string to be processed
++ */
++void remove_spaces(s)
++        char *s;
++{
++    int i, j;
++    
++    
++    i = 0;
++    j = 0;
++    while (i < strlen(s)) {
++        if (!isspace(s[i])) {
++            s[j++] = s[i];
++        }
++        i++;
++    }
++    
++    for (i = j; i < strlen(s); i++) {
++        s[i] = 0;
++    }
++}
++
++/*
++ * Get the section name from the given line
++ * ... line - the line to be parsed
++ * ... section - the extracted section from the parsed line
++ */
++void get_section(line, section)
++        char *line; 
++        char *section;
++{
++    char *pch = strtok(line, CONFIGURATION_FILE_SECTION);
++    
++    while (NULL != pch) {
++        strcpy(section, pch);
++        pch = strtok(NULL, CONFIGURATION_FILE_SECTION);
++    }
++}
++
++/*
++ * Get the key value pair from the given line
++ * ... line - the line to be parsed
++ * ... key - the extracted key from the parsed line
++ * ... value - the extracted value from the parsed line
++ */
++void get_key_value_pair(line, key, value)
++        char *line;
++        char *key;
++        char *value;
++{
++    char *pch = strstr(line, CONFIGURATION_FILE_KEY_VALUE_SEPARATOR);
++    
++    
++    key[0] = 0;
++    value[0] = 0;
++    
++    
++    if (NULL != pch) {
++        int index  = (int)(pch - line);
++        
++        strncpy(key, line, index);
++        key[index] = 0;
++        
++        index++;
++        strncpy(value, line + index, strlen(line) - index);
++        value[strlen(line) - index] = 0;
++    }
++}
++
++/*
++ * Set the key value for given section, key and value
++ * ... section - the section to be set
++ * ... key - the section key to be set
++ * ... value - the section key value to be set
++ */
++void set_key_value_pair(section, key, value)
++        char *section;
++        char *key; 
++        char *value;
++{
++    int i;
++    
++   
++    if (0 == strcmp(section, PKI_SECRET_KEY_INFO_SECTION)) {
++        if (0 == strcmp(key, SECRET_KEY_PASSPHRASE_KEY)) {
++            strcpy(private_key_passphrase, value);
++            memset(value, 0, CONFIGURATION_FILE_LINE_MAX_LENGTH);
++        }
++        return;
++    }
++    
++    if (0 == strcmp(section, PGP_SECRET_KEY_INFO_SECTION)) {
++        if (0 == strcmp(key, SECRET_KEY_FINGERPRINT)) {
++            remove_spaces(value);
++            strcpy(secret_key_fingerprint, value);
++            memset(value, 0, CONFIGURATION_FILE_LINE_MAX_LENGTH);
++        }
++        if (0 == strcmp(key, SECRET_KEY_PASSPHRASE_KEY)) {
++            strcpy(secret_key_passphrase, value);
++            strcat(secret_key_passphrase, "\n");
++            memset(value, 0, CONFIGURATION_FILE_LINE_MAX_LENGTH);
++        }
++        return;
++    }
++   
++    
++    for (i = 0; i <= DHCPLEASEACTIVE; i++) {
++        if (0 == strcmp(section, DHCP_MESSAGE_NAME[i])) {
++            break;
++        }
++    }         
++            
++    if (i <= DHCPLEASEACTIVE) {
++        if (0 == strcmp(key, AUTHENTICATION_TYPE_KEY)) {
++            if (0 == strcmp(value, NO_AUTHENTICATION_VALUE)) {
++                actions[i].authentication_type = NO_AUTHENTICATION;
++            }
++            if (0 == strcmp(value, PKI_AUTHENTICATION_VALUE)) {
++                actions[i].authentication_type = PKI_AUTHENTICATION;
++            }
++            if (0 == strcmp(value, PGP_AUTHENTICATION_VALUE)) {
++                actions[i].authentication_type = PGP_AUTHENTICATION;
++            }
++        }
++    } else {
++        log_info("Unknown section '%s' in configuration file", section);
++    }
++}
++
++
++/*
++ * Read the dhcpauth configuration file
++ * ... 
++ */
++void read_dhcpauth_configuration_file()
++{
++    char line[CONFIGURATION_FILE_LINE_MAX_LENGTH];
++
++    char section[CONFIGURATION_FILE_LINE_MAX_LENGTH];
++    char key[CONFIGURATION_FILE_LINE_MAX_LENGTH];
++    char value[CONFIGURATION_FILE_LINE_MAX_LENGTH];
++    
++    
++    memset(section, 0, CONFIGURATION_FILE_LINE_MAX_LENGTH);
++    memset(key, 0, CONFIGURATION_FILE_LINE_MAX_LENGTH);
++    memset(value, 0, CONFIGURATION_FILE_LINE_MAX_LENGTH);
++
++
++    FILE *fp = fopen(CONFIGURATION_FILE, CONFIGURATION_FILE_ACCESS_MODE);
++    if (NULL == fp) {
++        log_error("Can not open the dhcpauth configuration file %s", 
++                    CONFIGURATION_FILE);
++        return;
++    }	
++
++    while (NULL != fgets(line, CONFIGURATION_FILE_LINE_MAX_LENGTH, fp)) {
++        trim(line);
++
++        if (NULL != strstr(line, CONFIGURATION_FILE_SECTION_BEGIN) && 
++                NULL != strstr(line, CONFIGURATION_FILE_SECTION_END)) {
++            get_section(line, section);
++        } else {
++            get_key_value_pair(line, key, value);
++            trim(key);
++            trim(value);
++            set_key_value_pair(section, key, value);
++        }
++    }
++
++    fclose(fp);
++}
++
++
++/*
++ * Initialize the client dhcpauth module
++ * ...
++ */
++void init_client_dhcpauth()
++{
++    read_dhcpauth_configuration_file();
++    
++    if ((PKI_AUTHENTICATION == actions[DHCPDISCOVER].authentication_type) || 
++        (PKI_AUTHENTICATION == actions[DHCPREQUEST].authentication_type) ||
++        (PKI_AUTHENTICATION == actions[DHCPDECLINE].authentication_type) ||
++        (PKI_AUTHENTICATION == actions[DHCPRELEASE].authentication_type) ||      
++        (PKI_AUTHENTICATION == actions[DHCPINFORM].authentication_type)) {
++        /* Read the client private key */
++        read_private_key();
++    }
++    
++    if ((PGP_AUTHENTICATION == actions[DHCPDISCOVER].authentication_type) || 
++        (PGP_AUTHENTICATION == actions[DHCPREQUEST].authentication_type) ||
++        (PGP_AUTHENTICATION == actions[DHCPDECLINE].authentication_type) ||
++        (PGP_AUTHENTICATION == actions[DHCPRELEASE].authentication_type) ||      
++        (PGP_AUTHENTICATION == actions[DHCPINFORM].authentication_type) ||
++        (PGP_AUTHENTICATION == actions[DHCPOFFER].authentication_type) || 
++        (PGP_AUTHENTICATION == actions[DHCPACK].authentication_type) ||
++        (PGP_AUTHENTICATION == actions[DHCPNAK].authentication_type)) {
++        /* Initialize PGP */
++        init_pgp();
++    }
++
++	if ((PGP_AUTHENTICATION == actions[DHCPDISCOVER].authentication_type) || 
++        (PGP_AUTHENTICATION == actions[DHCPREQUEST].authentication_type) ||
++        (PGP_AUTHENTICATION == actions[DHCPDECLINE].authentication_type) ||
++        (PGP_AUTHENTICATION == actions[DHCPRELEASE].authentication_type) ||      
++        (PGP_AUTHENTICATION == actions[DHCPINFORM].authentication_type)) {
++        /* Read the secret key using the given secret key fingerprint */
++        read_secret_key();
++    }
++    
++#ifdef ENABLE_STATISTICS
++    /* Initialize the client statistics file */
++    init_statistics_file(CLIENT_STATISTICS_FILE_NAME);
++#endif
++}
++
++/*
++ * Initialize the server dhcpauth module
++ * ...
++ */
++void init_server_dhcpauth()
++{
++    read_dhcpauth_configuration_file();
++    
++    if ((PKI_AUTHENTICATION == actions[DHCPOFFER].authentication_type) || 
++        (PKI_AUTHENTICATION == actions[DHCPACK].authentication_type) ||
++        (PKI_AUTHENTICATION == actions[DHCPNAK].authentication_type)) {
++        /* Read the server private key */
++        read_private_key();
++    }
++    
++    if ((PGP_AUTHENTICATION == actions[DHCPOFFER].authentication_type) || 
++        (PGP_AUTHENTICATION == actions[DHCPACK].authentication_type) ||
++        (PGP_AUTHENTICATION == actions[DHCPNAK].authentication_type) || 
++        (PGP_AUTHENTICATION == actions[DHCPDISCOVER].authentication_type) || 
++        (PGP_AUTHENTICATION == actions[DHCPREQUEST].authentication_type) ||
++        (PGP_AUTHENTICATION == actions[DHCPDECLINE].authentication_type) ||
++        (PGP_AUTHENTICATION == actions[DHCPRELEASE].authentication_type) ||      
++        (PGP_AUTHENTICATION == actions[DHCPINFORM].authentication_type)) {
++        /* Initialize PGP */
++        init_pgp();
++    }
++
++	if ((PGP_AUTHENTICATION == actions[DHCPOFFER].authentication_type) || 
++        (PGP_AUTHENTICATION == actions[DHCPACK].authentication_type) ||
++        (PGP_AUTHENTICATION == actions[DHCPNAK].authentication_type)) {
++        /* Read the secret key using the given secret key fingerprint */
++        read_secret_key();
++    }
++
++#ifdef ENABLE_STATISTICS
++    /* Initialize the server statistics file */
++    init_statistics_file(SERVER_STATISTICS_FILE_NAME);
++#endif
++}
++
++
++/*
++ * Shutdown the client dhcpauth module
++ * ...
++ */
++void shutdown_client_dhcpauth()
++{
++    if ((PKI_AUTHENTICATION == actions[DHCPDISCOVER].authentication_type) || 
++        (PKI_AUTHENTICATION == actions[DHCPREQUEST].authentication_type) ||
++        (PKI_AUTHENTICATION == actions[DHCPDECLINE].authentication_type) ||
++        (PKI_AUTHENTICATION == actions[DHCPRELEASE].authentication_type) ||      
++        (PKI_AUTHENTICATION == actions[DHCPINFORM].authentication_type)) {
++        /* Free the client private key */
++        free_private_key();
++    }
++    
++    if ((PKI_AUTHENTICATION == actions[DHCPOFFER].authentication_type) || 
++        (PKI_AUTHENTICATION == actions[DHCPACK].authentication_type) ||
++        (PKI_AUTHENTICATION == actions[DHCPNAK].authentication_type)) {
++        /* Free the server public key */
++        free_public_key();
++    }
++    
++    if ((PGP_AUTHENTICATION == actions[DHCPDISCOVER].authentication_type) || 
++        (PGP_AUTHENTICATION == actions[DHCPREQUEST].authentication_type) ||
++        (PGP_AUTHENTICATION == actions[DHCPDECLINE].authentication_type) ||
++        (PGP_AUTHENTICATION == actions[DHCPRELEASE].authentication_type) ||      
++        (PGP_AUTHENTICATION == actions[DHCPINFORM].authentication_type)) {
++        /* Free the secret key */
++        free_secret_key();
++    }
++}
++
++/*
++ * Shutdown the server dhcpauth module
++ * ...
++ */
++void shutdown_server_dhcpauth()
++{
++    if ((PKI_AUTHENTICATION == actions[DHCPOFFER].authentication_type) || 
++        (PKI_AUTHENTICATION == actions[DHCPACK].authentication_type) ||
++        (PKI_AUTHENTICATION == actions[DHCPNAK].authentication_type)) {
++        /* Free the server private key */
++        free_private_key();
++    }
++     
++    if ((PKI_AUTHENTICATION == actions[DHCPDISCOVER].authentication_type) || 
++        (PKI_AUTHENTICATION == actions[DHCPREQUEST].authentication_type) ||
++        (PKI_AUTHENTICATION == actions[DHCPDECLINE].authentication_type) ||
++        (PKI_AUTHENTICATION == actions[DHCPRELEASE].authentication_type) ||      
++        (PKI_AUTHENTICATION == actions[DHCPINFORM].authentication_type)) {
++        /* Free the client public key */
++        free_public_key();
++    }
++    
++    if ((PGP_AUTHENTICATION == actions[DHCPOFFER].authentication_type) || 
++        (PGP_AUTHENTICATION == actions[DHCPACK].authentication_type) ||
++        (PGP_AUTHENTICATION == actions[DHCPNAK].authentication_type)) {
++        /* Free the secret key */
++        free_secret_key();
++    }
++}
+diff -Naur dhcp-4.2.7/common/Makefile.in dhcp-4.2.7+dhcpauth/common/Makefile.in
+--- dhcp-4.2.7/common/Makefile.in	2014-07-30 00:41:04.000000000 +0200
++++ dhcp-4.2.7+dhcpauth/common/Makefile.in	2015-05-02 01:00:00.000000000 +0200
+@@ -98,6 +98,7 @@
+ am__v_AR_1 = 
+ libdhcp_a_AR = $(AR) $(ARFLAGS)
+ libdhcp_a_LIBADD =
++# dhcpauth - begin
+ am_libdhcp_a_OBJECTS = alloc.$(OBJEXT) bpf.$(OBJEXT) comapi.$(OBJEXT) \
+ 	conflex.$(OBJEXT) ctrace.$(OBJEXT) discover.$(OBJEXT) \
+ 	dispatch.$(OBJEXT) dlpi.$(OBJEXT) dns.$(OBJEXT) \
+@@ -106,7 +107,8 @@
+ 	nit.$(OBJEXT) ns_name.$(OBJEXT) options.$(OBJEXT) \
+ 	packet.$(OBJEXT) parse.$(OBJEXT) print.$(OBJEXT) raw.$(OBJEXT) \
+ 	resolv.$(OBJEXT) socket.$(OBJEXT) tables.$(OBJEXT) \
+-	tr.$(OBJEXT) tree.$(OBJEXT) upf.$(OBJEXT)
++	tr.$(OBJEXT) tree.$(OBJEXT) upf.$(OBJEXT) dhcpauth.$(OBJEXT)
++# dhcpauth - end	
+ libdhcp_a_OBJECTS = $(am_libdhcp_a_OBJECTS)
+ AM_V_P = $(am__v_P_@AM_V@)
+ am__v_P_ = $(am__v_P_@AM_DEFAULT_V@)
+@@ -341,11 +343,13 @@
+ AM_CPPFLAGS = -I.. -DLOCALSTATEDIR='"@localstatedir@"'
+ AM_CFLAGS = $(LDAP_CFLAGS)
+ noinst_LIBRARIES = libdhcp.a
++# dhcpauth - begin
+ libdhcp_a_SOURCES = alloc.c bpf.c comapi.c conflex.c ctrace.c discover.c \
+ 		    dispatch.c dlpi.c dns.c ethernet.c execute.c fddi.c \
+ 		    icmp.c inet.c lpf.c memory.c nit.c ns_name.c options.c \
+ 		    packet.c parse.c print.c raw.c resolv.c socket.c \
+-		    tables.c tr.c tree.c upf.c
++		    tables.c tr.c tree.c upf.c dhcpauth.c
++# dhcpauth - end
+ 
+ man_MANS = dhcp-eval.5 dhcp-options.5
+ EXTRA_DIST = $(man_MANS)
+@@ -433,6 +437,9 @@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/tr.Po@am__quote@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/tree.Po@am__quote@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/upf.Po@am__quote@
++# dhcpauth - begin
++@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/dhcpauth.Po@am__quote@
++# dhcpauth - end
+ 
+ .c.o:
+ @am__fastdepCC_TRUE@	$(AM_V_CC)$(COMPILE) -MT $@ -MD -MP -MF $(DEPDIR)/$*.Tpo -c -o $@ $<
+diff -Naur dhcp-4.2.7/common/options.c dhcp-4.2.7+dhcpauth/common/options.c
+--- dhcp-4.2.7/common/options.c	2014-08-07 00:59:22.000000000 +0200
++++ dhcp-4.2.7+dhcpauth/common/options.c	2015-05-02 01:00:00.000000000 +0200
+@@ -661,7 +661,17 @@
+ 				priority_list[priority_len++] =
+ 					DHO_SUBNET_SELECTION;
+ 		}
+-
++                
++                /* dhcpauth - begin */
++                if((op = lookup_option(&dhcp_universe, cfg_options, 
++                                        DHO_AUTHENTICATE))) {
++                        if(priority_len < PRIORITY_COUNT) {
++                                priority_list[priority_len++] = 
++                                        DHO_AUTHENTICATE;
++                        }
++                 }
++                /* dhcpauth - end */
++                
+ 		data_string_truncate(prl, (PRIORITY_COUNT - priority_len));
+ 
+ 		/*
+diff -Naur dhcp-4.2.7/common/print.c dhcp-4.2.7+dhcpauth/common/print.c
+--- dhcp-4.2.7/common/print.c	2014-07-30 00:41:05.000000000 +0200
++++ dhcp-4.2.7+dhcpauth/common/print.c	2015-05-02 01:00:00.000000000 +0200
+@@ -303,6 +303,13 @@
+ 			lbuf[54]=' ';
+ 			lbuf[55]=' ';
+ 			lbuf[73]='\0';
++                        
++                        /* dhcpauth - begin */
++#ifdef PRINT_DHCP_MESSAGE_TO_CONSOLE
++                        printf("%s\n",lbuf);
++#endif
++                        /* dhcpauth - end */
++                        
+ 			log_info ("%s", lbuf);
+ 		  }
+ 		  memset(lbuf, ' ', 79);
+@@ -327,6 +334,13 @@
+ 	lbuf[54]=' ';
+ 	lbuf[55]=' ';
+ 	lbuf[73]='\0';
++        
++        /* dhcpauth - begin */
++#ifdef PRINT_DHCP_MESSAGE_TO_CONSOLE
++        printf("%s\n", lbuf);
++#endif
++        /* dhcpauth - end */
++        
+ 	log_info ("%s", lbuf);
+ }
+ 
+diff -Naur dhcp-4.2.7/common/tables.c dhcp-4.2.7+dhcpauth/common/tables.c
+--- dhcp-4.2.7/common/tables.c	2014-08-07 00:59:22.000000000 +0200
++++ dhcp-4.2.7+dhcpauth/common/tables.c	2015-05-02 01:00:00.000000000 +0200
+@@ -189,7 +189,10 @@
+ 	{ "bcms-controller-address", "Ia",	&dhcp_universe,  89, 1 },
+ 
+ 	/* 90 is the authentication option (RFC 3118) */
+-
++        /* dhcpauth - begin */
++        { "dhcp-authentication", "X",           &dhcp_universe,  90, 1 },
++        /* dhcpauth - end */
++        
+ 	{ "client-last-transaction-time", "L",  &dhcp_universe,  91, 1 },
+ 	{ "associated-ip", "Ia",                &dhcp_universe,  92, 1 },
+ #if 0
+diff -Naur dhcp-4.2.7/dhcpauth.info dhcp-4.2.7+dhcpauth/dhcpauth.info
+--- dhcp-4.2.7/dhcpauth.info	1970-01-01 01:00:00.000000000 +0200
++++ dhcp-4.2.7+dhcpauth/dhcpauth.info	2015-05-02 01:00:00.000000000 +0200
+@@ -0,0 +1,577 @@
++================================================================================
++Copyright (C) 2013-2015 Daniel Dinu <contact@danieldinu.ro>
++================================================================================
++
++
++================================================================================
++We used:
++    * DHCP: dhcp-4.2.7 (http://www.isc.org/downloads/dhcp/)
++    * OpenSSL: OpenSSL 1.0.1f 6 Jan 2014 (https://www.openssl.org/source/)
++ 
++The sources were built on:
++    Ubuntu 14.04.1 LTS (trusty)    32-bit
++================================================================================
++
++
++================================================================================
++In order to build the dhcpauth module you need to install:
++    * libssl-dev:
++        sudo apt-get install libssl-dev
++================================================================================
++
++
++================================================================================
++Commands:
++--------------------------------------------------------------------------------
++./configure
++make clean
++make
++================================================================================
++
++
++================================================================================
++DHCPAuth configuration file
++--------------------------------------------------------------------------------
++Path: /etc/dhcpauth.conf
++
++A) Server
++# PKI secret key info
++[PKI_SECRET_KEY_INFO]
++SECRET_KEY_PASSPHRASE=***
++
++
++# DHCP messages sent by client
++[DHCPDISCOVER]
++AUTHENTICATION_TYPE=PGP_AUTHENTICATION
++
++[DHCPREQUEST]
++AUTHENTICATION_TYPE=PGP_AUTHENTICATION
++
++[DHCPDECLINE]
++AUTHENTICATION_TYPE=PGP_AUTHENTICATION
++
++[DHCPRELEASE]
++AUTHENTICATION_TYPE=PGP_AUTHENTICATION
++
++[DHCPINFORM]
++AUTHENTICATION_TYPE=PGP_AUTHENTICATION
++
++
++# DHCP messages sent by server
++[DHCPOFFER]
++AUTHENTICATION_TYPE=PKI_AUTHENTICATION
++
++[DHCPACK]
++AUTHENTICATION_TYPE=PKI_AUTHENTICATION
++
++[DHCPNAK]
++AUTHENTICATION_TYPE=PKI_AUTHENTICATION
++
++B) Client
++# PGP secret key info
++[PGP_SECRET_KEY_INFO]
++SECRET_KEY_FINGERPRINT=0000 1111 2222 3333 4444  5555 6666 7777 8888 9999
++SECRET_KEY_PASSPHRASE=***
++
++
++# DHCP messages sent by client
++[DHCPDISCOVER]
++AUTHENTICATION_TYPE=PGP_AUTHENTICATION
++
++[DHCPREQUEST]
++AUTHENTICATION_TYPE=PGP_AUTHENTICATION
++
++[DHCPDECLINE]
++AUTHENTICATION_TYPE=PGP_AUTHENTICATION
++
++[DHCPRELEASE]
++AUTHENTICATION_TYPE=PGP_AUTHENTICATION
++
++[DHCPINFORM]
++AUTHENTICATION_TYPE=PGP_AUTHENTICATION
++
++
++# DHCP messages sent by server
++[DHCPOFFER]
++AUTHENTICATION_TYPE=PKI_AUTHENTICATION
++
++[DHCPACK]
++AUTHENTICATION_TYPE=PKI_AUTHENTICATION
++
++[DHCPNAK]
++AUTHENTICATION_TYPE=PKI_AUTHENTICATION
++================================================================================
++
++
++================================================================================
++DHCP server configuration file
++--------------------------------------------------------------------------------
++Path: /etc/dhcpd.conf
++
++default-lease-time 3;
++max-lease-time 3;
++option subnet-mask 255.255.255.0;
++option broadcast-address 192.168.2.255;
++option domain-name "danieldinu.ro";
++subnet 192.168.2.0 netmask 255.255.255.0 {
++    range 192.168.2.10 192.168.2.100;
++    range 192.168.2.150 192.168.2.200;
++}
++authoritative;
++================================================================================
++
++
++================================================================================
++Run
++--------------------------------------------------------------------------------
++Server: ./server/dhcpd
++Client: ./client/dhclient/dhclient eth0
++================================================================================
++
++
++================================================================================
++Modifications to ISC DHCP makefiles:
++    * ./common/Makefile.in
++    * ./client/Makefile.in:
++    * ./server/Makefile.in:
++
++Observations: 
++    Better is to modify directly the Makefile.am and then to use automake to 
++generate the Makefile.in from it. The Makefile is generated from Makefile.in 
++when ./configure is used. Although this is the right way, it requires more work 
++and it is harder than modifying directly the Makefile.in
++================================================================================
++
++
++================================================================================
++Code modifications:
++--------------------------------------------------------------------------------
++1) Added in ./common/:
++    dhcpauth.c
++
++2) Modifications in other files follow the pattern bellow:
++    /* dhcpauth - begin */
++    code ...
++    /* dhcpauth - end */
++================================================================================
++
++
++================================================================================
++ISC DHCP Entry Points
++--------------------------------------------------------------------------------
++A) DHCP Client - ./client/dhclient.c
++
++    I Send
++        1) DISCOVER 
++            - make_discover:
++void make_discover (client, lease)
++	struct client_state *client;
++	struct client_lease *lease;
++
++            - add authentication option:
++void
++make_client_options(struct client_state *client, struct client_lease *lease,
++                    u_int8_t *type, struct option_cache *sid,
++                    struct iaddr *rip, struct option **prl,
++                    struct option_state **op)
++
++            - add signature:
++void send_discover (cpp)
++        void *cpp;
++
++        2) REQUEST 
++            - make_request
++void make_request (client, lease)
++	struct client_state *client;
++	struct client_lease *lease;
++
++            - add authentication option:
++void
++make_client_options(struct client_state *client, struct client_lease *lease,
++		    u_int8_t *type, struct option_cache *sid,
++		    struct iaddr *rip, struct option **prl,
++		    struct option_state **op)
++
++            - add signature:
++void send_request (cpp)
++        void *cpp;
++
++        3) DECLINE
++            - add authentication option:
++void
++make_client_options(struct client_state *client, struct client_lease *lease,
++		    u_int8_t *type, struct option_cache *sid,
++		    struct iaddr *rip, struct option **prl,
++		    struct option_state **op)
++
++            - add signature:
++void send_decline (cpp)
++	void *cpp;
++
++        4) RELEASE
++            - add authentication option:
++void
++make_client_options(struct client_state *client, struct client_lease *lease,
++		    u_int8_t *type, struct option_cache *sid,
++		    struct iaddr *rip, struct option **prl,
++		    struct option_state **op)
++
++            - add signature:
++void send_release (cpp)
++	void *cpp;
++
++        5) INFORM
++            - add authentication option:
++            - add signature:
++
++    II Receive
++        1) OFFER
++            - verify signature:
++void dhcpoffer (packet)
++        struct packet *packet;
++
++        2) ACK
++            - verify signature:
++void dhcpack (packet)
++	struct packet *packet;
++        
++        3) NAK
++            - verify signature:
++void dhcpnak (packet)
++	struct packet *packet;
++
++--------------------------------------------------------------------------------
++B) DHCP Server - ./server/dhcp.c
++    
++    I Send
++        1) OFFER
++            - add authentication option:
++void dhcp_reply (lease)
++        struct lease *lease;
++
++            - add signature:
++void dhcp_reply (lease)
++        struct lease *lease;
++
++        2) ACK
++            - add authentication option:
++void dhcp_reply (lease)
++        struct lease *lease;
++
++            - add signature:
++void dhcp_reply (lease)
++	struct lease *lease;
++
++        3) NAK
++            - add authentication option:
++void nak_lease (packet, cip)
++	struct packet *packet;
++	struct iaddr *cip;
++
++            - add signature:
++void nak_lease (packet, cip)
++	struct packet *packet;
++	struct iaddr *cip;
++
++    II Receive
++        1) DISCOVER
++            - verify signature:
++void dhcpdiscover (packet, ms_nulltp)
++struct packet *packet;
++int ms_nulltp;
++
++        2) REQUEST
++            - verify signature:
++void dhcprequest (packet, ms_nulltp, ip_lease)
++	struct packet *packet;
++	int ms_nulltp;
++	struct lease *ip_lease;
++
++        3) DECLINE
++            - verify signature:
++void dhcpdecline (packet, ms_nulltp)
++	struct packet *packet;
++	int ms_nulltp;
++            
++        4) RELEASE
++            - verify signature:
++void dhcprelease (packet, ms_nulltp)
++	struct packet *packet;
++	int ms_nulltp;
++
++        5) INFORM
++            - verify signature:
++void dhcpinform (packet, ms_nulltp)
++	struct packet *packet;
++	int ms_nulltp;
++        
++================================================================================
++
++
++================================================================================
++DHCP Message Types: ./includes/dhcp.h
++--------------------------------------------------------------------------------
++#define DHCPDISCOVER            1  // Client - OK; Server - OK;
++#define DHCPOFFER               2  // Server - OK; Client - OK;
++#define DHCPREQUEST             3  // Client - OK; Server - OK;
++#define DHCPDECLINE             4  // Client - OK; Server - OK; *
++#define DHCPACK                 5  // Server - OK; Client - OK;
++#define DHCPNAK                 6  // Server - OK; Client - OK; *
++#define DHCPRELEASE             7  // Client - OK; Server - OK; *
++#define DHCPINFORM              8  // Client - NO; Server - OK; *
++#define DHCPLEASEQUERY          10 // NO
++#define DHCPLEASEUNASSIGNED     11 // NO
++#define DHCPLEASEUNKNOWN        12 // NO 
++#define DHCPLEASEACTIVE         13 // NO
++
++More info - RFC 2131:
++   Message         Use
++   -------         ---
++
++   DHCPDISCOVER -  Client broadcast to locate available servers.
++
++   DHCPOFFER    -  Server to client in response to DHCPDISCOVER with
++                   offer of configuration parameters.
++
++   DHCPREQUEST  -  Client message to servers either (a) requesting
++                   offered parameters from one server and implicitly
++                   declining offers from all others, (b) confirming
++                   correctness of previously allocated address after,
++                   e.g., system reboot, or (c) extending the lease on a
++                   particular network address.
++
++   DHCPACK      -  Server to client with configuration parameters,
++                   including committed network address.
++
++   DHCPNAK      -  Server to client indicating client's notion of network
++                   address is incorrect (e.g., client has moved to new
++                   subnet) or client's lease as expired
++
++   DHCPDECLINE  -  Client to server indicating network address is already
++                   in use.
++
++   DHCPRELEASE  -  Client to server relinquishing network address and
++                   cancelling remaining lease.
++
++   DHCPINFORM   -  Client to server, asking only for local configuration
++                   parameters; client already has externally configured
++                   network address.
++
++Observation:
++    - we assume that the DHCPFORCERENEW message type described in DHCP Handbook 
++has the code value 9 
++    - for more about DHCPINFORM see: 
++	http://tools.ietf.org/html/draft-ietf-dhc-dhcpinform-clarify-06
++================================================================================
++
++
++================================================================================
++Log: ./omapip/errwarn.c
++View log: tail -f /var/log/syslog
++--------------------------------------------------------------------------------
++/* Log an error message, then exit... */
++void log_fatal (const char * fmt, ... )
++
++/* Log an error message... */
++int log_error (const char * fmt, ...)
++
++/* Log a note... */
++int log_info (const char *fmt, ...)
++
++/* Log a debug message... */
++int log_debug (const char *fmt, ...)
++================================================================================
++
++
++================================================================================
++Authentication for DHCP Messages - RFC 3118
++--------------------------------------------------------------------------------
++
++   The following diagram defines the format of the DHCP authentication
++   option:
++
++   0                   1                   2                   3
++   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
++   |     Code      |    Length     |  Protocol     |   Algorithm   |
++   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
++   |     RDM       | Replay Detection (64 bits)                    |
++   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
++   |  Replay cont.                                                 |
++   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
++   |  Replay cont. |                                               |
++   +-+-+-+-+-+-+-+-+                                               |
++   |                                                               |
++   |           Authentication Information                          |
++   |                                                               |
++   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
++
++
++Code = The DHCP option code (90 = 0x5A)
++
++Length = The authentication option option length, starting from Protocol field
++            and ending with Authentication Information field
++
++Protocol = The particular technique for authentication used in the option.
++                a. If the protocol field is 0, the authentication information 
++                    field holds a simple configuration token.
++                b. If the protocol field is 1, the message is using the "delayed
++                    authentication" mechanism.
++                c. Additional values from the Protocol name space will be 
++                    assigned through IETF Consensus.
++
++Algorithm = The specific algorithm within the technique identified by the 
++                protocol field
++            For the configuration token Protocol, the Algorithm field MUST be 0.
++                For the delayed authentication Protocol, the Algorithm value 1 
++                is assigned to the HMAC-MD5 generating function.
++            Additional values from the Algorithm name space for Algorithm will
++                be assigned through IETF Consensus.
++
++RDM = The type of replay detection used in the Replay Detection field
++         If the RDM field contains 0x00, the replay detection field MUST be
++            set to the value of a monotonically increasing counter.  Using a
++            counter value such as the current time of day (e.g., an NTP-format
++            timestamp) can reduce the danger of replay attacks.  This method
++            MUST be supported by all protocols.
++         Additional values from the RDM name space will be assigned through
++            IETF Consensus
++
++Replay Detection
++        i. The value of a monotonically increasing counter
++
++Authentication Information
++        a. plain text password 
++        b. This authentication information contains a nonce value generated by 
++            the source as a message authentication code (MAC) to provide message 
++            authentication and entity authentication.
++            - particular technique based on the HMAC protocol using the MD5 
++                hash: Secret ID (32 bits) + HMAC-MD5(128 bits)
++
++Validation:
++    1. check the Replay Detection field value
++    2. compute the MAC (set 'giaddr' <- 0 and 'hops' <- 0 fields)
++    3. compare the computed MAC with the received Authentication Information
++
++Observation: 
++    We used the structure above, with the following changes:
++        Protocol = 2 (PKI) & 3 (PGP)
++        Algorithm = 2 (SHA-1) & 3 (SHA-2)
++        RDM = 0
++        Replay detection = The increasing counter given by the current time
++        Authentication Information = Signature Length (4 bytes) + Signature
++================================================================================
++
++
++================================================================================
++Encoding Long Options in the Dynamic Host Configuration 
++    Protocol (DHCPv4) - RFC 3396
++--------------------------------------------------------------------------------
++
++Option Format: 
++    code = 52 = 0x34 (8 bits) || length (8 bits) || data (x bytes)
++
++=> Max option data size: 255 bytes
++
++Aggregate buffer: 
++    optional parameter field || file field || sname field
++
++To use aggregate buffer you must set the Encoding Long Option (52 = 0x34).
++Possible data values:
++    0 => no option overload
++    1 => use file field
++    3 => use sname field
++================================================================================
++
++
++================================================================================
++File paths
++--------------------------------------------------------------------------------
++A. Server
++
++1. Config file:                 /etc/dhcpd.conf
++2. Lease database:              /var/db/dhcpd.lease
++3. PID file:                    /var/run/dhcpd.pid
++4. Private key:                 /var/db/key/key.pem
++5. DHCPAuth config file:        /etc/dhcpauth.conf
++
++
++B. Client
++
++1. Config file:                 /etc/dhclient.conf
++2. Lease database:              /var/db/dhclient.lease
++3. PID file:                    /var/run/dhclient.pid
++4. Script file:                 /sbin/dhclient-script
++5. Certificates:                /var/db/cert/*
++6. DHCPAuth config file:        /etc/dhcpauth.conf
++
++================================================================================
++
++
++================================================================================
++tcpdump
++--------------------------------------------------------------------------------
++    tcpdump -i eth0 -vvv -n port bootps
++  
++Options:
++-i eth0 -> Listen on interface. If unspecified, tcpdump searches the system 
++                interface list for the lowest numbered, configured up interface 
++                (excluding loopback). Ties are broken by choosing the earliest 
++                match. On Linux systems with 2.2 or later kernels, an interface 
++                argument of ``any'' can be used to capture packets from all 
++                interfaces. Note that captures on the ``any'' device will not 
++                be done in promiscuous mode. 
++                If the -D flag is supported, an interface number as printed by 
++                that flag can be used as the interface argument.
++
++-v -> When parsing and printing, produce (slightly more) verbose output. 
++        For example, the time to live, identification, total length and options 
++        in an IP packet are printed. Also enables additional packet integrity 
++        checks such as verifying the IP and ICMP header checksum. 
++        When writing to a file with the -w option, report, every 10 seconds, 
++        the number of packets captured. 
++
++-vv -> Even more verbose output. For example, additional fields are printed 
++            from NFS reply packets, and SMB packets are fully decoded. 
++
++-vvv -> Even more verbose output. For example, telnet SB ... SE options are 
++            printed in full. With -X Telnet options are printed in hex as well. 
++        
++-n -> Don't convert addresses (i.e., host addresses, port numbers, etc.)
++                 to names.
++
++Observation:
++    - for more details, see: http://www.tcpdump.org/tcpdump_man.html
++================================================================================
++
++
++================================================================================
++DHCP
++--------------------------------------------------------------------------------
++Older versions can be downloaded from:
++    http://ftp.isc.org/isc/dhcp/
++================================================================================
++
++
++================================================================================
++OpenSSL
++--------------------------------------------------------------------------------
++Get OpenSSL version:
++    openssl version -a
++
++View certificate info:
++    openssl -x509 -noout -text -in cert.pem
++================================================================================
++
++
++================================================================================
++Simulation results
++--------------------------------------------------------------------------------
++The simulation results are written to the following files:
++    Server:
++        /var/db/statistics_server.csv
++    Client:
++        /var/db/statistics_client.csv
++
++The results are in CSV format with comma (',') as separator
++================================================================================
+diff -Naur dhcp-4.2.7/includes/dhcpd.h dhcp-4.2.7+dhcpauth/includes/dhcpd.h
+--- dhcp-4.2.7/includes/dhcpd.h	2014-08-07 00:59:23.000000000 +0200
++++ dhcp-4.2.7+dhcpauth/includes/dhcpd.h	2015-05-02 01:00:00.000000000 +0200
+@@ -3582,3 +3582,107 @@
+ 
+ #define MAX_ADDRESS_STRING_LEN \
+    (sizeof("ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255"))
++
++/* dhcpauth - begin */
++#ifndef DHCP_AUTHENTICATION_OPTION_LENGTH
++#define DHCP_AUTHENTICATION_OPTION_LENGTH \
++                DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH + \
++                SIGNATURE_LENGTH_FIELD_LENGTH
++#endif
++
++#ifndef DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH
++#define DHCP_AUTHENTICATION_OPTION_FIXED_LENGTH 11
++#endif
++
++#ifndef SIGNATURE_LENGTH_FIELD_LENGTH
++#define SIGNATURE_LENGTH_FIELD_LENGTH 2
++#endif
++
++
++#ifndef NO_AUTHENTICATION
++#define NO_AUTHENTICATION 0
++#endif
++
++#ifndef PKI_AUTHENTICATION
++#define PKI_AUTHENTICATION 1
++#endif
++
++#ifndef PGP_AUTHENTICATION
++#define PGP_AUTHENTICATION 2
++#endif
++
++#ifndef ACTIONS
++#define ACTIONS
++
++struct action {
++    int message_type;
++    int authentication_type;
++};
++
++extern struct action actions[];
++#endif
++
++
++/* 
++ * Requires PRINT_DHCP_MESSAGE_TO_CONSOLE and KEEP_DHCP_CLIENT_CONSOLE_OUTPUT 
++ * ... and/or KEEP_DHCP_SERVER_CONSOLE_OUTPUT to be activated to be able to 
++ * ... print the packet content to the console, else the packet content is 
++ * ... printed into the syslog file
++ */
++#ifndef DEBUG_PACKET
++//#define DEBUG_PACKET
++#endif
++
++#ifndef KEEP_DHCP_CLIENT_CONSOLE_OUTPUT
++//#define KEEP_DHCP_CLIENT_CONSOLE_OUTPUT
++#endif
++
++#ifndef KEEP_DHCP_SERVER_CONSOLE_OUTPUT
++//#define KEEP_DHCP_SERVER_CONSOLE_OUTPUT
++#endif
++
++#ifndef PRINT_DHCP_MESSAGE_TO_CONSOLE
++//#define PRINT_DHCP_MESSAGE_TO_CONSOLE
++#endif
++
++
++#ifndef ENABLE_STATISTICS
++//#define ENABLE_STATISTICS
++#endif
++
++
++/*
++ * Enable to avoid memory leaks when the dhcpauth module is shutdown
++ * ...
++ */
++#ifndef ENABLE_GENTLE_SHUTDOWN
++#define ENABLE_GENTLE_SHUTDOWN
++#endif
++
++
++void init_client_dhcpauth();
++void init_server_dhcpauth();
++
++void shutdown_client_dhcpauth();
++void shutdown_server_dhcpauth();
++
++
++int sent_signature_max_length();
++
++
++void sign_packet(int dhcp_messge_type, struct dhcp_packet *dhcp_packet, 
++                        int dhcp_packet_length);
++int verify_packet(struct packet *packet);
++
++
++#ifdef ENABLE_STATISTICS
++void start_total_timer();
++void stop_total_timer();
++
++void start_auth_sign_timer();
++void stop_auth_sign_timer();
++
++void start_auth_verify_timer();
++void stop_auth_verify_timer();
++#endif
++/* dhcpauth - end */
+\ No newline at end of file
+diff -Naur dhcp-4.2.7/server/dhcp.c dhcp-4.2.7+dhcpauth/server/dhcp.c
+--- dhcp-4.2.7/server/dhcp.c	2014-08-07 00:59:23.000000000 +0200
++++ dhcp-4.2.7+dhcpauth/server/dhcp.c	2015-05-02 01:00:00.000000000 +0200
+@@ -220,7 +220,20 @@
+ 		break;
+ 
+ 	      case DHCPREQUEST:
++                /* dhcpauth - begin */
++#ifdef ENABLE_STATISTICS
++                start_total_timer();
++#endif
++                /* dhcpauth - end */
++                  
+ 		dhcprequest (packet, ms_nulltp, lease);
++                
++                /* dhcpauth - begin */
++#ifdef ENABLE_STATISTICS
++                stop_total_timer();
++#endif
++                /* dhcpauth - end */
++                  
+ 		break;
+ 
+ 	      case DHCPRELEASE:
+@@ -269,6 +282,15 @@
+ 	dhcp_failover_state_t *peer;
+ #endif
+ 
++        /* dhcpauth - begin */
++        if (verify_packet(packet)) {
++                /* Signature isn't valid => we ignore the packet */
++                log_info("Invalid DHCP DISCOVER from %s", 
++                                piaddr (packet -> client_addr));
++                return;
++        }
++        /* dhcpauth - end */
++        
+ 	find_lease (&lease, packet, packet -> shared_network,
+ 		    0, &peer_has_leases, (struct lease *)0, MDL);
+ 
+@@ -415,6 +437,23 @@
+ #endif
+ 	int have_requested_addr = 0;
+ 
++        /* dhcpauth - begin */
++#ifdef ENABLE_STATISTICS
++        start_auth_verify_timer();
++#endif
++        
++        if (verify_packet(packet)) {
++                /* Signature isn't valid => we ignore the packet */
++                log_info("Invalid DHCP REQUEST from %s", 
++                                piaddr (packet -> client_addr));
++                return;
++        }
++        
++#ifdef ENABLE_STATISTICS
++        stop_auth_verify_timer();
++#endif
++        /* dhcpauth - end */
++        
+ 	oc = lookup_option (&dhcp_universe, packet -> options,
+ 			    DHO_DHCP_REQUESTED_ADDRESS);
+ 	memset (&data, 0, sizeof data);
+@@ -705,6 +744,15 @@
+ 	struct packet *packet;
+ 	int ms_nulltp;
+ {
++        /* dhcpauth - begin */
++        if (verify_packet(packet)) {
++                /* Signature isn't valid => we ignore the packet */
++                log_info("Invalid DHCP RELEASE from %s", 
++                                piaddr (packet -> client_addr));
++                return;
++        }
++        /* dhcpauth - end */
++            
+ 	struct lease *lease = (struct lease *)0, *next = (struct lease *)0;
+ 	struct iaddr cip;
+ 	struct option_cache *oc;
+@@ -853,6 +901,15 @@
+ 	struct option_cache *oc;
+ 	struct data_string data;
+ 
++        /* dhcpauth - begin */
++        if (verify_packet(packet)) {
++                /* Signature isn't valid => we ignore the packet */
++                log_info("Invalid DHCP DECLINE from %s", 
++                                piaddr (packet -> client_addr));
++                return;
++        }
++        /* dhcpauth - end */
++        
+ 	/* DHCPDECLINE must specify address. */
+ 	if (!(oc = lookup_option (&dhcp_universe, packet -> options,
+ 				  DHO_DHCP_REQUESTED_ADDRESS)))
+@@ -987,6 +1044,15 @@
+ 	struct interface_info *interface;
+ 	int result;
+ 
++        /* dhcpauth - begin */
++        if (verify_packet(packet)) {
++                /* Signature isn't valid => we ignore the packet */
++                log_info("Invalid DHCP INFORM from %s", 
++                                piaddr (packet -> client_addr));
++                return;
++        }
++        /* dhcpauth - end */
++        
+ 	/* The client should set ciaddr to its IP address, but apparently
+ 	   it's common for clients not to do this, so we'll use their IP
+ 	   source address if they didn't set ciaddr. */
+@@ -1254,14 +1320,18 @@
+ 	delete_option(&dhcp_universe, options, DHO_DHCP_RENEWAL_TIME);
+ 	delete_option(&dhcp_universe, options, DHO_DHCP_REBINDING_TIME);
+ 
++        /* dhcpauth - begin */
+ 	/* Set up the option buffer... */
+ 	outgoing.packet_length =
+ 		cons_options (packet, outgoing.raw, (struct lease *)0,
+ 			      (struct client_state *)0,
+-			      0, packet -> options, options, &global_scope,
+-			      0, nulltp, 0,
++			      /*0*/ DHCP_MTU_MAX, packet -> options, options, 
++                              &global_scope,
++			      /*0*/ 3, nulltp, 0,
+ 			      prl.len ? &prl : (struct data_string *)0,
+ 			      (char *)0);
++        /* dhcpauth - end */
++        
+ 	option_state_dereference (&options, MDL);
+ 	data_string_forget (&prl, MDL);
+ 
+@@ -1440,12 +1510,43 @@
+ 	delete_option (&dhcp_universe, packet -> options,
+ 		       DHO_DHCP_PARAMETER_REQUEST_LIST);
+ 
++        /* dhcpauth - begin */
++        if (actions[DHCPNAK].authentication_type) {
++            unsigned char *auth_buffer = malloc(
++                (DHCP_AUTHENTICATION_OPTION_LENGTH + 
++                        sent_signature_max_length()) * sizeof(char));
++            memset(auth_buffer, 0, DHCP_AUTHENTICATION_OPTION_LENGTH + 
++                                        sent_signature_max_length());
++
++            i = DHO_AUTHENTICATE;
++            if (option_cache_allocate(&oc, MDL)) {
++                if (make_const_data(&oc -> expression, auth_buffer, 
++                        DHCP_AUTHENTICATION_OPTION_LENGTH + 
++                                sent_signature_max_length(), 0, 0, MDL)) {
++                    option_code_hash_lookup(&oc -> option, 
++                                                dhcp_universe.code_hash, &i, 0, 
++                                                MDL);
++                    save_option(&dhcp_universe, options, oc);
++                }
++                option_cache_dereference(&oc, MDL);
++            }
++
++            if (auth_buffer) {
++                free(auth_buffer);
++                auth_buffer = NULL;
++            }
++        }
++        
+ 	/* Set up the option buffer... */
+ 	outgoing.packet_length =
+ 		cons_options (packet, outgoing.raw, (struct lease *)0,
+ 			      (struct client_state *)0,
+-			      0, packet -> options, options, &global_scope,
+-			      0, 0, 0, (struct data_string *)0, (char *)0);
++			      /*0*/ DHCP_MTU_MAX, packet -> options, options, 
++                              &global_scope,
++			      /*0*/ 3, 0, 0, (struct data_string *)0, 
++                              (char *)0);
++        /* dhcpauth - end */
++        
+ 	option_state_dereference (&options, MDL);
+ 
+ /*	memset (&raw.ciaddr, 0, sizeof raw.ciaddr);*/
+@@ -1490,6 +1591,10 @@
+ 	if (outgoing.packet_length < BOOTP_MIN_LEN)
+ 		outgoing.packet_length = BOOTP_MIN_LEN;
+ 
++        /* dhcpauth - begin */
++        sign_packet(DHCPNAK, &raw, outgoing.packet_length);
++        /* dhcpauth - end */
++        
+ 	/* If this was gatewayed, send it back to the gateway.
+ 	   Otherwise, broadcast it on the local network. */
+ 	if (raw.giaddr.s_addr) {
+@@ -3140,15 +3245,46 @@
+ 	else
+ 		bootpp = 1;
+ 
++        /* dhcpauth - begin */
++        if (actions[state -> offer].authentication_type) {
++            struct option_cache *oc = (struct option_cache *)0;
++
++            unsigned char *auth_buffer = malloc(
++                (DHCP_AUTHENTICATION_OPTION_LENGTH + 
++                        sent_signature_max_length()) * sizeof(char));
++            memset(auth_buffer, 0, DHCP_AUTHENTICATION_OPTION_LENGTH + 
++                                        sent_signature_max_length());
++
++            unsigned i = DHO_AUTHENTICATE;
++            if (option_cache_allocate(&oc, MDL)) {
++                if (make_const_data(&oc -> expression, auth_buffer, 
++                        DHCP_AUTHENTICATION_OPTION_LENGTH + 
++                                sent_signature_max_length(), 0, 0, MDL)) {
++                    option_code_hash_lookup(&oc -> option, 
++                                                dhcp_universe.code_hash, &i, 0, 
++                                                MDL);
++                    save_option(&dhcp_universe, state -> options, oc);
++                }
++                option_cache_dereference(&oc, MDL);
++            }
++
++            if (auth_buffer) {
++                free(auth_buffer);
++                auth_buffer = NULL;
++            }
++        }
++        
+ 	/* Insert such options as will fit into the buffer. */
+ 	packet_length = cons_options (state -> packet, &raw, lease,
+ 				      (struct client_state *)0,
+-				      state -> max_message_size,
++				      /*state -> max_message_size*/ 
++                                      DHCP_MTU_MAX,
+ 				      state -> packet -> options,
+ 				      state -> options, &global_scope,
+ 				      bufs, nulltp, bootpp,
+ 				      &state -> parameter_request_list,
+ 				      (char *)0);
++        /* dhcpauth - end */
+ 
+ 	memcpy (&raw.ciaddr, &state -> ciaddr, sizeof raw.ciaddr);
+ 	memcpy (&raw.yiaddr, lease -> ip_addr.iabuf, 4);
+@@ -3205,6 +3341,18 @@
+ 	if (packet_length < BOOTP_MIN_LEN)
+ 		packet_length = BOOTP_MIN_LEN;
+ 
++        /* dhcpauth - begin */
++#ifdef ENABLE_STATISTICS
++        start_auth_sign_timer();
++#endif
++
++        sign_packet(state -> offer, &raw, packet_length);
++
++#ifdef ENABLE_STATISTICS
++        stop_auth_sign_timer();
++#endif
++        /* dhcpauth - end */
++        
+ 	/* If this was gatewayed, send it back to the gateway... */
+ 	if (raw.giaddr.s_addr) {
+ 		to.sin_addr = raw.giaddr;
+diff -Naur dhcp-4.2.7/server/dhcpd.c dhcp-4.2.7+dhcpauth/server/dhcpd.c
+--- dhcp-4.2.7/server/dhcpd.c	2014-08-07 00:59:23.000000000 +0200
++++ dhcp-4.2.7+dhcpauth/server/dhcpd.c	2015-05-02 01:00:00.000000000 +0200
+@@ -262,6 +262,10 @@
+ 	uid_t set_uid = 0;
+ 	gid_t set_gid = 0;
+ #endif /* PARANOIA */
++        
++        /* dhcpauth - begin */
++        init_server_dhcpauth();
++        /* dhcpauth - end */
+ 
+         /* Make sure that file descriptors 0 (stdin), 1, (stdout), and
+            2 (stderr) are open. To do this, we assume that when we
+@@ -832,6 +836,10 @@
+ 		/* Become session leader and get pid... */
+ 		(void) setsid();
+ 
++                /* dhcpauth - begin */
++#ifndef KEEP_DHCP_SERVER_CONSOLE_OUTPUT
++                /* dhcpauth - end */
++                
+                 /* Close standard I/O descriptors. */
+                 (void) close(0);
+                 (void) close(1);
+@@ -842,6 +850,10 @@
+                 (void) open("/dev/null", O_RDWR);
+                 (void) open("/dev/null", O_RDWR);
+                 log_perror = 0; /* No sense logging to /dev/null. */
++                
++                /* dhcpauth - begin */
++#endif
++                /* dhcpauth - end */
+ 
+        		IGNORE_RET (chdir("/"));
+ 	}
+@@ -1459,6 +1471,10 @@
+ 	}
+ 
+ 	if (shutdown_state == shutdown_done) {
++            /* dhcpauth - begin */
++            shutdown_server_dhcpauth();
++            /* dhcpauth - end */
++            
+ 	    for (state = failover_states; state; state = state -> next) {
+ 		if (state -> me.state == shut_down) {
+ 		    if (state -> link_to_peer)
+@@ -1476,6 +1492,10 @@
+ 	}		
+ #else
+ 	if (shutdown_state == shutdown_done) {
++            /* dhcpauth - begin */
++            shutdown_server_dhcpauth();
++            /* dhcpauth - end */
++            
+ #if defined (DEBUG_MEMORY_LEAKAGE) && \
+ 		defined (DEBUG_MEMORY_LEAKAGE_ON_EXIT)
+ 		free_everything ();
+@@ -1531,4 +1551,4 @@
+ 	add_timeout(&tv,
+ 		    (void (*)(void *))dhcp_io_shutdown_countdown, 0, 0, 0);
+ 	return ISC_R_SUCCESS;
+-}
++}
+\ No newline at end of file
+diff -Naur dhcp-4.2.7/server/Makefile.in dhcp-4.2.7+dhcpauth/server/Makefile.in
+--- dhcp-4.2.7/server/Makefile.in	2014-08-07 00:59:23.000000000 +0200
++++ dhcp-4.2.7+dhcpauth/server/Makefile.in	2015-05-02 01:00:00.000000000 +0200
+@@ -442,7 +442,9 @@
+ 
+ dhcpd$(EXEEXT): $(dhcpd_OBJECTS) $(dhcpd_DEPENDENCIES) $(EXTRA_dhcpd_DEPENDENCIES) 
+ 	@rm -f dhcpd$(EXEEXT)
+-	$(AM_V_CCLD)$(dhcpd_LINK) $(dhcpd_OBJECTS) $(dhcpd_LDADD) $(LIBS)
++	# dhcpauth - begin
++	$(AM_V_CCLD)$(dhcpd_LINK) $(dhcpd_OBJECTS) $(dhcpd_LDADD) $(LIBS) -lcrypto
++	# dhcpauth - end
+ 
+ mostlyclean-compile:
+ 	-rm -f *.$(OBJEXT)

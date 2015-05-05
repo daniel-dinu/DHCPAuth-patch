@@ -1,0 +1,5 @@
+Diff:
+	diff -Naur dhcp-4.2.7 dhcp-4.2.7+dhcpauth > dhcpauth_pki.patch
+
+Patch:
+	patch -p0 < dhcpauth_pki.patch
